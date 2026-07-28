@@ -28,6 +28,29 @@ class TMDBClient:
             print(f"Error searching TV show: {e}")
             return []
     
+    def search_movie(self, query: str, year: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Etsii elokuvaa nimellä ja vuosiluvulla"""
+        
+        url = f"{self.base_url}/search/movie"
+        params = {
+            "api_key": self.api_key,
+            "query": query,
+            "language": "en-US"
+        }
+        
+        if year:
+            params["year"] = year
+        
+        try:
+            response = self.session.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
+            return data.get("results", [])
+            
+        except requests.exceptions.RequestException as e:
+            print(f"Error searching movie: {e}")
+            return []
+    
     def get_show_details(self, show_id: int) -> Optional[Dict[str, Any]]:
         """Hakee sarjan yksityiskohdat"""
         
@@ -79,4 +102,21 @@ class TMDBClient:
             
         except requests.exceptions.RequestException as e:
             print(f"Error getting external IDs: {e}")
+            return {}
+    
+    def get_movie_external_ids(self, movie_id: int) -> Dict[str, str]:
+        """Hakee elokuvan ulkoiset ID:t (IMDB, jne.)"""
+        
+        url = f"{self.base_url}/movie/{movie_id}/external_ids"
+        params = {
+            "api_key": self.api_key
+        }
+        
+        try:
+            response = self.session.get(url, params=params)
+            response.raise_for_status()
+            return response.json()
+            
+        except requests.exceptions.RequestException as e:
+            print(f"Error getting movie external IDs: {e}")
             return {}
