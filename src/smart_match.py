@@ -1,12 +1,12 @@
-# smart_match.py
 import re
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Optional
 from dataclasses import dataclass
 
 from config import Config
 from api_clients.opensubtitles import OpenSubtitlesClient
 from api_clients.tmdb import TMDBClient
+
 
 @dataclass
 class EpisodeInfo:
@@ -16,155 +16,608 @@ class EpisodeInfo:
     file_path: Path
     language: str = "en"
 
+
+@dataclass
+class MovieInfo:
+    title: str
+    year: Optional[int]
+    file_path: Path
+    language: str = "en"
+
+
 class SmartMatcher:
     def __init__(self):
-        self.opensubtitles = OpenSubtitlesClient(Config.OPENSUBTITLES_API_KEY)
-        self.tmdb = TMDBClient(Config.TMDB_API_KEY)
-    
+        self.opensubtitles = OpenSubtitlesClient(
+            Config.OPENSUBTITLES_API_KEY
+        )
+
+        self.tmdb = TMDBClient(
+            Config.TMDB_API_KEY
+        )
+
+    # === TV SERIES METHODS ===
+
     def scan_video_library(self, library_path: str) -> List[EpisodeInfo]:
-        """Skannaa videokansion ja tunnistaa sarjat, kaudet ja jaksot"""
-        
+        """
+        Scan video library and return list of found episodes.
+        """
         episodes = []
         library = Path(library_path)
-        
+
+        print(f"Scanning library: {library}")
+
         for video_file in library.rglob("*"):
+            if not video_file.is_file():
+                continue
+
             if not self._is_video_file(video_file):
                 continue
-            
-            episode_info = self._parse_filename(video_file.name)
+
+            print(f"VIDEO FOUND: {video_file.name}")
+
+            episode_info = self._parse_tv_filename(video_file.name)
+
             if episode_info:
+                print(
+                    f"MATCHED: "
+                    f"{episode_info.show_name} "
+                    f"S{episode_info.season:02d}"
+                    f"E{episode_info.episode:02d}"
+                )
+
                 episode_info.file_path = video_file
                 episodes.append(episode_info)
-        
+            else:
+                # Try parsing as movie if TV parse fails
+                movie_info = self._parse_movie_filename(video_file.name)
+                if movie_info:
+                    print(f"  (This looks like a movie: {movie_info.title})")
+                else:
+                    print(f"NO MATCH: {video_file.name}")
+
+        print(f"TOTAL MATCHED: {len(episodes)}")
+
         return episodes
-    
-    def _is_video_file(self, file_path: Path) -> bool:
-        """Tarkistaa onko tiedosto video"""
-        video_extensions = {".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm"}
-        return file_path.suffix.lower() in video_extensions
-    
-    def _parse_filename(self, filename: str) -> Optional[EpisodeInfo]:
-        """Parsii videotiedoston nimen"""
-        
-        # Common patterns: Show.Name.S01E01.mkv, Show Name - 1x01.mp4, etc.
+
+    def _parse_tv_filename(self, filename: str) -> Optional[EpisodeInfo]:
+        """
+        Parse TV episode filename.
+        Supports:
+        - Jane.The.Virgin.S03E03
+        - Jane_the_Virgin_S03E03
+        - Jane-the-Virgin-S03E03
+        - Jane the Virgin 3x03
+        """
+        name = Path(filename).stem
+
         patterns = [
-            # Pattern: Show.Name.S01E01.mkv
-            r'(.+?)\.S(\d{2})E(\d{2})',
-            # Pattern: Show Name - 1x01.mp4
-            r'(.+?)\s*-\s*(\d+)x(\d+)',
-            # Pattern: Show.Name.1x01.mkv
-            r'(.+?)\.(\d+)x(\d+)',
-            # Pattern: Show.Name.S01E01E02.mkv (double episode)
-            r'(.+?)\.S(\d{2})E(\d{2})E\d{2}',
-            # Pattern: Show.Name.101.mkv (season 1, episode 1)
-            r'(.+?)\.(\d)(\d{2})',
+            # Jane the Virgin S03E03
+            r"(.+?)[\s._-]+S(\d{1,2})E(\d{1,2})",
+
+            # Jane the Virgin 3x03
+            r"(.+?)[\s._-]+(\d{1,2})x(\d{1,2})",
+
+            # Show.Name.S03E03E04
+            r"(.+?)[\s._-]+S(\d{1,2})E(\d{1,2})E\d{1,2}",
+
+            # Show.Name.303
+            r"(.+?)[\s._-]+(\d)(\d{2})",
         ]
-        
+
         for pattern in patterns:
-            match = re.search(pattern, filename, re.IGNORECASE)
-            if match:
-                show_name = self._clean_show_name(match.group(1))
+            match = re.search(
+                pattern,
+                name,
+                re.IGNORECASE
+            )
+
+            if not match:
+                continue
+
+            try:
+                show_name = self._clean_show_name(
+                    match.group(1)
+                )
+
                 season = int(match.group(2))
                 episode = int(match.group(3))
-                
+
+                # Make sure season/episode are reasonable
+                if season > 30 or episode > 100:
+                    continue
+
                 return EpisodeInfo(
                     show_name=show_name,
                     season=season,
                     episode=episode,
-                    file_path=Path("")  # Will be set later
+                    file_path=Path("")
                 )
-        
+
+            except (ValueError, IndexError):
+                continue
+
         return None
-    
+
     def _clean_show_name(self, name: str) -> str:
-        """Siivoaa sarjan nimen"""
-        # Poista ylimääräiset pisteet ja välilyönnit
-        name = re.sub(r'[.\s]+', ' ', name).strip()
-        # Poista vuosiluku (2000-2099)
-        name = re.sub(r'\b(19|20)\d{2}\b', '', name)
-        # Poista laatumerkinnät (720p, WEBRip, jne.)
-        name = re.sub(r'\b(720p|1080p|2160p|WEBRip|WEB-DL|BluRay|HDRip|BRRip)\b', '', name, flags=re.IGNORECASE)
-        return name.strip()
-    
+        """
+        Clean show name - improved version.
+        """
+        # Replace dots, underscores, hyphens with spaces
+        name = re.sub(r"[._-]+", " ", name)
+        
+        # Remove extra spaces
+        name = re.sub(r"\s+", " ", name).strip()
+        
+        # Remove year (1900-2099)
+        name = re.sub(r"\b(19|20)\d{2}\b", "", name)
+        
+        # Remove common quality tags and release groups
+        name = re.sub(
+            r"\b(480p|720p|1080p|2160p|WEBRip|WEB-DL|BluRay|HDRip|BRRip|REPACK|PROPER|x264|x265|HEVC|H\.264|H\.265|AC3|DTS|AAC|MP3|DD5\.1|Dual|Audio|Multi|Sub|Fix|DVD|BDRip|WEB|DL|Rip|HC|HDTV|TV|Season|Complete|AMZN|NF|HMAX|iT|WEB|RARBG|EZTV|YIFY|YTS|TBS|E?ZTV|XVID|DIVX|AVC|REMUX)\b",
+            "",
+            name,
+            flags=re.IGNORECASE
+        )
+        
+        # Remove episode patterns (S01E01, 1x01, etc.)
+        name = re.sub(r"\bS\d{1,2}E\d{1,2}\b", "", name, flags=re.IGNORECASE)
+        name = re.sub(r"\b\d{1,2}x\d{1,2}\b", "", name)
+        
+        # Remove common words in brackets/parentheses
+        name = re.sub(r"\s*\[.*?\]\s*", " ", name)
+        name = re.sub(r"\s*\(.*?\)\s*", " ", name)
+        
+        # Remove extra spaces and trim
+        name = re.sub(r"\s+", " ", name).strip()
+        
+        # Capitalize properly (each word)
+        name = " ".join(word.capitalize() for word in name.split())
+        
+        return name
+
     def find_show_id(self, show_name: str) -> Optional[int]:
-        """Etsii sarjan TMDB ID:n"""
-        
-        results = self.tmdb.search_tv_show(show_name)
-        if not results:
+        """
+        Search TMDB TV show ID with fallback options.
+        """
+        if not show_name:
             return None
+            
+        # Clean the name first
+        show_name = self._clean_show_name(show_name)
+        print(f"Searching for: '{show_name}'")
         
-        # Ota ensimmäinen tulos
-        return results[0].get("id")
-    
+        # Try exact search first
+        results = self.tmdb.search_tv_show(show_name)
+        
+        if results:
+            print(f"Found: {results[0].get('name')}")
+            return results[0].get("id")
+        
+        # Try with common variations
+        variations = []
+        
+        # Original
+        variations.append(show_name)
+        
+        # Remove "The" from beginning
+        if show_name.lower().startswith("the "):
+            variations.append(show_name[4:])
+        
+        # Replace & with and
+        variations.append(show_name.replace(" & ", " and "))
+        variations.append(show_name.replace(" and ", " & "))
+        
+        # Remove apostrophes
+        variations.append(show_name.replace("'", ""))
+        
+        # Remove dots and hyphens (already handled by clean)
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        variations = [v for v in variations if not (v in seen or seen.add(v))]
+        
+        for variant in variations:
+            if variant == show_name:
+                continue
+            print(f"  Trying variation: '{variant}'")
+            results = self.tmdb.search_tv_show(variant)
+            if results:
+                print(f"  Found with variation: '{variant}' -> {results[0].get('name')}")
+                return results[0].get("id")
+        
+        print(f"Could not find show: '{show_name}'")
+        return None
+
     def get_imdb_id(self, show_id: int) -> Optional[str]:
-        """Hakee IMDB ID:n TMDB ID:n perusteella"""
-        
+        """
+        Get IMDb ID from TMDB.
+        """
         external_ids = self.tmdb.get_external_ids(show_id)
         return external_ids.get("imdb_id")
-    
-    def download_subtitles_for_episode(self, episode_info: EpisodeInfo, imdb_id: str) -> Optional[Path]:
-        """Lataa tekstitykset yhdelle jaksolle"""
-        
+
+    def download_subtitles_for_episode(
+        self,
+        episode_info: EpisodeInfo,
+        imdb_id: str,
+        language: str = None
+    ) -> Optional[Path]:
+        """
+        Download subtitles for a single episode.
+        """
+        if language is None:
+            language = episode_info.language
+
         subtitles = self.opensubtitles.search_subtitles(
             imdb_id=imdb_id,
             season=episode_info.season,
             episode=episode_info.episode,
-            language=episode_info.language
+            language=language
         )
-        
+
         if not subtitles:
             return None
-        
-        # Ota ensimmäinen tekstitys
+
         subtitle_data = subtitles[0]
-        file_info = self.opensubtitles.get_subtitle_file(subtitle_data)
-        
+
+        file_info = self.opensubtitles.get_subtitle_file(
+            subtitle_data
+        )
+
         if not file_info:
             return None
-        
+
         file_id = file_info.get("file_id")
+
         if not file_id:
             return None
-        
-        # Lataa tekstitys
-        content = self.opensubtitles.download_subtitle(file_id)
+
+        content = self.opensubtitles.download_subtitle(
+            file_id
+        )
+
         if not content:
             return None
-        
-        # Tallenna tiedosto
+
         output_dir = episode_info.file_path.parent
-        output_file = output_dir / f"{episode_info.file_path.stem}.{episode_info.language}.srt"
-        
+
+        output_file = (
+            output_dir /
+            f"{episode_info.file_path.stem}.{language}.srt"
+        )
+
         with open(output_file, "wb") as f:
             f.write(content)
-        
+
         return output_file
-    
-    def match_all_episodes(self, library_path: str, language: str = "en") -> Dict[Path, Path]:
-        """Suorittaa Smart Match -toiminnon koko kirjastolle"""
-        
-        # 1. Skannaa videot
-        episodes = self.scan_video_library(library_path)
+
+    def match_all_episodes(
+        self,
+        library_path: str,
+        language: str = "en"
+    ) -> Dict[Path, Path]:
+        """
+        Match all episodes and download subtitles.
+        """
+        episodes = self.scan_video_library(
+            library_path
+        )
+
         if not episodes:
+            print("No episodes found in library")
             return {}
-        
-        # 2. Tunnista sarja
+
         show_name = episodes[0].show_name
+
+        print(f"\nDetected show: '{show_name}'")
+
         show_id = self.find_show_id(show_name)
+
         if not show_id:
-            print(f"Could not find show: {show_name}")
+            print(f"Could not find show: '{show_name}'")
             return {}
-        
+
         imdb_id = self.get_imdb_id(show_id)
+
         if not imdb_id:
-            print(f"Could not get IMDB ID for: {show_name}")
+            print(f"Could not get IMDb ID for: '{show_name}'")
             return {}
-        
-        # 3. Lataa tekstitykset
+
+        print(f"IMDB ID: {imdb_id}")
+        print(f"Downloading subtitles for {len(episodes)} episodes...")
+
         results = {}
+
         for episode in episodes:
-            subtitle_file = self.download_subtitles_for_episode(episode, imdb_id)
+            print(f"  Episode {episode.episode:02d}...")
+            subtitle_file = self.download_subtitles_for_episode(
+                episode,
+                imdb_id,
+                language
+            )
+
             if subtitle_file:
                 results[episode.file_path] = subtitle_file
-        
+                print(f"    ✓ Downloaded")
+            else:
+                print(f"    ✗ No subtitle found")
+
         return results
+
+    # === MOVIE METHODS ===
+
+    def scan_movie_library(self, library_path: str) -> List[MovieInfo]:
+        """
+        Scan video library for movies.
+        """
+        movies = []
+        library = Path(library_path)
+
+        print(f"Scanning movie library: {library}")
+
+        for video_file in library.rglob("*"):
+            if not video_file.is_file():
+                continue
+
+            if not self._is_video_file(video_file):
+                continue
+
+            print(f"VIDEO FOUND: {video_file.name}")
+
+            movie_info = self._parse_movie_filename(video_file.name)
+
+            if movie_info:
+                year_str = f" ({movie_info.year})" if movie_info.year else ""
+                print(f"MATCHED: {movie_info.title}{year_str}")
+
+                movie_info.file_path = video_file
+                movies.append(movie_info)
+            else:
+                print(f"NO MATCH: {video_file.name}")
+
+        print(f"TOTAL MOVIES: {len(movies)}")
+
+        return movies
+
+    def _parse_movie_filename(self, filename: str) -> Optional[MovieInfo]:
+        """
+        Parse movie filename.
+        Supports:
+        - Movie Name 2023.mp4
+        - Movie.Name.2023.mkv
+        - Movie Name (2023).mp4
+        - Movie.Name.2023.1080p.BluRay.mkv
+        """
+        name = Path(filename).stem
+
+        # Remove common quality tags
+        clean_name = re.sub(
+            r"\b(480p|720p|1080p|2160p|WEBRip|WEB-DL|BluRay|HDRip|BRRip)\b",
+            "",
+            name,
+            flags=re.IGNORECASE
+        )
+
+        # Try to find year in parentheses: "Movie Name (2023)"
+        year_match = re.search(r"\((\d{4})\)", clean_name)
+        if year_match:
+            year = int(year_match.group(1))
+            title = re.sub(r"\s*\(\d{4}\)\s*", "", clean_name)
+            title = self._clean_movie_title(title)
+            if title:
+                return MovieInfo(title=title, year=year, file_path=Path(""))
+
+        # Try to find year: "Movie Name 2023" or "Movie.Name.2023"
+        year_match = re.search(r"[\s._-](\d{4})$", clean_name)
+        if year_match:
+            year = int(year_match.group(1))
+            title = re.sub(r"[\s._-]\d{4}$", "", clean_name)
+            title = self._clean_movie_title(title)
+            if title:
+                return MovieInfo(title=title, year=year, file_path=Path(""))
+
+        # No year found, just use the title
+        title = self._clean_movie_title(clean_name)
+        
+        # Check if it has valid movie patterns (e.g., not "S01E01" pattern)
+        if re.search(r"S\d{1,2}E\d{1,2}", title, re.IGNORECASE):
+            return None
+            
+        # Skip if title is too short or looks like a TV show
+        if len(title) < 2:
+            return None
+            
+        return MovieInfo(title=title, year=None, file_path=Path(""))
+
+    def _clean_movie_title(self, name: str) -> str:
+        """
+        Clean movie title.
+        """
+        # Replace dots and underscores with spaces
+        name = re.sub(r"[._]", " ", name)
+        
+        # Remove extra spaces
+        name = re.sub(r"\s+", " ", name).strip()
+        
+        # Remove common video tags
+        name = re.sub(
+            r"\b(480p|720p|1080p|2160p|WEBRip|WEB-DL|BluRay|HDRip|BRRip|REPACK|PROPER|x264|x265|HEVC)\b",
+            "",
+            name,
+            flags=re.IGNORECASE
+        )
+        
+        # Remove group names in brackets or parentheses
+        name = re.sub(r"\s*\[.*?\]\s*", "", name)
+        name = re.sub(r"\s*\{.*?\}\s*", "", name)
+        
+        # Remove extra spaces
+        name = re.sub(r"\s+", " ", name).strip()
+        
+        # Capitalize properly
+        name = " ".join(word.capitalize() for word in name.split())
+        
+        return name
+
+    def find_movie_id(self, title: str, year: Optional[int] = None) -> Optional[int]:
+        """
+        Search TMDB movie ID.
+        """
+        if not title:
+            return None
+            
+        results = self.tmdb.search_movie(title, year=year)
+
+        if not results:
+            return None
+
+        return results[0].get("id")
+
+    def get_movie_imdb_id(self, movie_id: int) -> Optional[str]:
+        """
+        Get IMDb ID for a movie from TMDB.
+        """
+        external_ids = self.tmdb.get_movie_external_ids(movie_id)
+        return external_ids.get("imdb_id")
+
+    def download_subtitles_for_movie(
+        self,
+        movie_info: MovieInfo,
+        language: str = "en"
+    ) -> Optional[Path]:
+        """
+        Download subtitles for a movie.
+        """
+        print(f"Searching for movie: {movie_info.title}")
+        
+        # Search for movie ID
+        movie_id = self.find_movie_id(movie_info.title, movie_info.year)
+        
+        if not movie_id:
+            print(f"Could not find movie: {movie_info.title}")
+            return None
+            
+        # Get IMDb ID
+        imdb_id = self.get_movie_imdb_id(movie_id)
+        
+        if not imdb_id:
+            print(f"Could not get IMDb ID for: {movie_info.title}")
+            return None
+            
+        print(f"IMDB ID: {imdb_id}")
+        
+        # Search for subtitles
+        subtitles = self.opensubtitles.search_subtitles(
+            imdb_id=imdb_id,
+            language=language
+        )
+
+        if not subtitles:
+            print(f"No subtitles found for: {movie_info.title}")
+            return None
+
+        # Get best subtitle (prefer hearing impaired if available, else first)
+        subtitle_data = self._get_best_subtitle(subtitles)
+
+        file_info = self.opensubtitles.get_subtitle_file(
+            subtitle_data
+        )
+
+        if not file_info:
+            return None
+
+        file_id = file_info.get("file_id")
+
+        if not file_id:
+            return None
+
+        content = self.opensubtitles.download_subtitle(
+            file_id
+        )
+
+        if not content:
+            return None
+
+        output_dir = movie_info.file_path.parent
+
+        output_file = (
+            output_dir /
+            f"{movie_info.file_path.stem}.{language}.srt"
+        )
+
+        with open(output_file, "wb") as f:
+            f.write(content)
+
+        return output_file
+
+    def _get_best_subtitle(self, subtitles: List[Dict]) -> Dict:
+        """
+        Select best subtitle from list.
+        Prefers hearing impaired subtitles, then standard.
+        """
+        # First try to find hearing impaired
+        for sub in subtitles:
+            if sub.get("hearing_impaired"):
+                return sub
+        
+        # Then try to find one with good score
+        best = subtitles[0]
+        best_score = 0
+        
+        for sub in subtitles:
+            score = sub.get("score", 0)
+            if score > best_score:
+                best_score = score
+                best = sub
+                
+        return best
+
+    def match_all_movies(
+        self,
+        library_path: str,
+        language: str = "en"
+    ) -> Dict[Path, Path]:
+        """
+        Match all movies and download subtitles.
+        """
+        movies = self.scan_movie_library(library_path)
+
+        if not movies:
+            print("No movies found in library")
+            return {}
+
+        results = {}
+
+        for movie in movies:
+            print(f"\nProcessing: {movie.title}")
+            
+            subtitle_file = self.download_subtitles_for_movie(
+                movie,
+                language
+            )
+
+            if subtitle_file:
+                results[movie.file_path] = subtitle_file
+                print(f"  ✓ Downloaded: {subtitle_file.name}")
+            else:
+                print(f"  ✗ No subtitle available")
+
+        return results
+
+    # === UTILITY METHODS ===
+
+    def _is_video_file(self, file_path: Path) -> bool:
+        """
+        Check whether file is a video file.
+        """
+        video_extensions = {
+            ".mp4",
+            ".mkv",
+            ".avi",
+            ".mov",
+            ".wmv",
+            ".flv",
+            ".webm",
+            ".m4v"
+        }
+
+        return file_path.suffix.lower() in video_extensions
