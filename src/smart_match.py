@@ -140,52 +140,99 @@ class SmartMatcher:
 
     def _clean_show_name(self, name: str) -> str:
         """
-        Clean show name.
+        Clean show name - improved version.
         """
+        # Replace dots, underscores, hyphens with spaces
+        name = re.sub(r"[._-]+", " ", name)
+        
+        # Remove extra spaces
+        name = re.sub(r"\s+", " ", name).strip()
+        
+        # Remove year (1900-2099)
+        name = re.sub(r"\b(19|20)\d{2}\b", "", name)
+        
+        # Remove common quality tags and release groups
         name = re.sub(
-            r"[._]+",
-            " ",
-            name
-        )
-
-        name = re.sub(
-            r"\s+",
-            " ",
-            name
-        ).strip()
-
-        name = re.sub(
-            r"\b(19|20)\d{2}\b",
-            "",
-            name
-        )
-
-        name = re.sub(
-            r"\b(480p|720p|1080p|2160p|WEBRip|WEB-DL|BluRay|HDRip|BRRip)\b",
+            r"\b(480p|720p|1080p|2160p|WEBRip|WEB-DL|BluRay|HDRip|BRRip|REPACK|PROPER|x264|x265|HEVC|H\.264|H\.265|AC3|DTS|AAC|MP3|DD5\.1|Dual|Audio|Multi|Sub|Fix|DVD|BDRip|WEB|DL|Rip|HC|HDTV|TV|Season|Complete|AMZN|NF|HMAX|iT|WEB|RARBG|EZTV|YIFY|YTS|TBS|E?ZTV|XVID|DIVX|AVC|REMUX)\b",
             "",
             name,
             flags=re.IGNORECASE
         )
+        
+        # Remove episode patterns (S01E01, 1x01, etc.)
+        name = re.sub(r"\bS\d{1,2}E\d{1,2}\b", "", name, flags=re.IGNORECASE)
+        name = re.sub(r"\b\d{1,2}x\d{1,2}\b", "", name)
+        
+        # Remove common words in brackets/parentheses
+        name = re.sub(r"\s*\[.*?\]\s*", " ", name)
+        name = re.sub(r"\s*\(.*?\)\s*", " ", name)
+        
+        # Remove extra spaces and trim
+        name = re.sub(r"\s+", " ", name).strip()
+        
+        # Capitalize properly (each word)
+        name = " ".join(word.capitalize() for word in name.split())
+        
+        return name
 
-        return name.strip()
-
-    def find_show_id(self, show_name: str) -> Optional[str]:
+    def find_show_id(self, show_name: str) -> Optional[int]:
         """
-        Search TMDB TV show ID.
+        Search TMDB TV show ID with fallback options.
         """
-        results = self.tmdb.search_tv_show(show_name)
-
-        if not results:
+        if not show_name:
             return None
-
-        return results[0].get("id")
+            
+        # Clean the name first
+        show_name = self._clean_show_name(show_name)
+        print(f"Searching for: '{show_name}'")
+        
+        # Try exact search first
+        results = self.tmdb.search_tv_show(show_name)
+        
+        if results:
+            print(f"Found: {results[0].get('name')}")
+            return results[0].get("id")
+        
+        # Try with common variations
+        variations = []
+        
+        # Original
+        variations.append(show_name)
+        
+        # Remove "The" from beginning
+        if show_name.lower().startswith("the "):
+            variations.append(show_name[4:])
+        
+        # Replace & with and
+        variations.append(show_name.replace(" & ", " and "))
+        variations.append(show_name.replace(" and ", " & "))
+        
+        # Remove apostrophes
+        variations.append(show_name.replace("'", ""))
+        
+        # Remove dots and hyphens (already handled by clean)
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        variations = [v for v in variations if not (v in seen or seen.add(v))]
+        
+        for variant in variations:
+            if variant == show_name:
+                continue
+            print(f"  Trying variation: '{variant}'")
+            results = self.tmdb.search_tv_show(variant)
+            if results:
+                print(f"  Found with variation: '{variant}' -> {results[0].get('name')}")
+                return results[0].get("id")
+        
+        print(f"Could not find show: '{show_name}'")
+        return None
 
     def get_imdb_id(self, show_id: int) -> Optional[str]:
         """
         Get IMDb ID from TMDB.
         """
         external_ids = self.tmdb.get_external_ids(show_id)
-
         return external_ids.get("imdb_id")
 
     def download_subtitles_for_episode(
@@ -256,27 +303,32 @@ class SmartMatcher:
         )
 
         if not episodes:
+            print("No episodes found in library")
             return {}
 
         show_name = episodes[0].show_name
 
-        print(f"Detected show: {show_name}")
+        print(f"\nDetected show: '{show_name}'")
 
         show_id = self.find_show_id(show_name)
 
         if not show_id:
-            print(f"Could not find show: {show_name}")
+            print(f"Could not find show: '{show_name}'")
             return {}
 
         imdb_id = self.get_imdb_id(show_id)
 
         if not imdb_id:
-            print(f"Could not get IMDb ID for: {show_name}")
+            print(f"Could not get IMDb ID for: '{show_name}'")
             return {}
+
+        print(f"IMDB ID: {imdb_id}")
+        print(f"Downloading subtitles for {len(episodes)} episodes...")
 
         results = {}
 
         for episode in episodes:
+            print(f"  Episode {episode.episode:02d}...")
             subtitle_file = self.download_subtitles_for_episode(
                 episode,
                 imdb_id,
@@ -285,6 +337,9 @@ class SmartMatcher:
 
             if subtitle_file:
                 results[episode.file_path] = subtitle_file
+                print(f"    ✓ Downloaded")
+            else:
+                print(f"    ✗ No subtitle found")
 
         return results
 
@@ -311,11 +366,8 @@ class SmartMatcher:
             movie_info = self._parse_movie_filename(video_file.name)
 
             if movie_info:
-                print(
-                    f"MATCHED: "
-                    f"{movie_info.title}"
-                    f" ({movie_info.year})" if movie_info.year else ""
-                )
+                year_str = f" ({movie_info.year})" if movie_info.year else ""
+                print(f"MATCHED: {movie_info.title}{year_str}")
 
                 movie_info.file_path = video_file
                 movies.append(movie_info)
@@ -351,7 +403,8 @@ class SmartMatcher:
             year = int(year_match.group(1))
             title = re.sub(r"\s*\(\d{4}\)\s*", "", clean_name)
             title = self._clean_movie_title(title)
-            return MovieInfo(title=title, year=year, file_path=Path(""))
+            if title:
+                return MovieInfo(title=title, year=year, file_path=Path(""))
 
         # Try to find year: "Movie Name 2023" or "Movie.Name.2023"
         year_match = re.search(r"[\s._-](\d{4})$", clean_name)
@@ -359,7 +412,8 @@ class SmartMatcher:
             year = int(year_match.group(1))
             title = re.sub(r"[\s._-]\d{4}$", "", clean_name)
             title = self._clean_movie_title(title)
-            return MovieInfo(title=title, year=year, file_path=Path(""))
+            if title:
+                return MovieInfo(title=title, year=year, file_path=Path(""))
 
         # No year found, just use the title
         title = self._clean_movie_title(clean_name)
@@ -386,7 +440,7 @@ class SmartMatcher:
         
         # Remove common video tags
         name = re.sub(
-            r"\b(480p|720p|1080p|2160p|WEBRip|WEB-DL|BluRay|HDRip|BRRip)\b",
+            r"\b(480p|720p|1080p|2160p|WEBRip|WEB-DL|BluRay|HDRip|BRRip|REPACK|PROPER|x264|x265|HEVC)\b",
             "",
             name,
             flags=re.IGNORECASE
@@ -396,18 +450,34 @@ class SmartMatcher:
         name = re.sub(r"\s*\[.*?\]\s*", "", name)
         name = re.sub(r"\s*\{.*?\}\s*", "", name)
         
-        return name.strip()
+        # Remove extra spaces
+        name = re.sub(r"\s+", " ", name).strip()
+        
+        # Capitalize properly
+        name = " ".join(word.capitalize() for word in name.split())
+        
+        return name
 
-    def find_movie_id(self, title: str, year: Optional[int] = None) -> Optional[str]:
+    def find_movie_id(self, title: str, year: Optional[int] = None) -> Optional[int]:
         """
         Search TMDB movie ID.
         """
+        if not title:
+            return None
+            
         results = self.tmdb.search_movie(title, year=year)
 
         if not results:
             return None
 
         return results[0].get("id")
+
+    def get_movie_imdb_id(self, movie_id: int) -> Optional[str]:
+        """
+        Get IMDb ID for a movie from TMDB.
+        """
+        external_ids = self.tmdb.get_movie_external_ids(movie_id)
+        return external_ids.get("imdb_id")
 
     def download_subtitles_for_movie(
         self,
@@ -427,8 +497,7 @@ class SmartMatcher:
             return None
             
         # Get IMDb ID
-        external_ids = self.tmdb.get_external_ids(movie_id)
-        imdb_id = external_ids.get("imdb_id")
+        imdb_id = self.get_movie_imdb_id(movie_id)
         
         if not imdb_id:
             print(f"Could not get IMDb ID for: {movie_info.title}")
@@ -513,6 +582,7 @@ class SmartMatcher:
         movies = self.scan_movie_library(library_path)
 
         if not movies:
+            print("No movies found in library")
             return {}
 
         results = {}
