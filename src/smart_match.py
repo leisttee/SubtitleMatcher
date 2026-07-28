@@ -186,14 +186,7 @@ class SmartMatcher:
         show_name = self._clean_show_name(show_name)
         print(f"Searching for: '{show_name}'")
         
-        # Try exact search first
-        results = self.tmdb.search_tv_show(show_name)
-        
-        if results:
-            print(f"Found: {results[0].get('name')}")
-            return results[0].get("id")
-        
-        # Try with common variations
+        # Common show name variations
         variations = []
         
         # Original
@@ -210,22 +203,43 @@ class SmartMatcher:
         # Remove apostrophes
         variations.append(show_name.replace("'", ""))
         
-        # Remove dots and hyphens (already handled by clean)
+        # Special cases for common shows
+        show_mappings = {
+            "Jane The Virgin": "Jane the Virgin",
+            "Jane the virgin": "Jane the Virgin",
+            "Breaking Bad": "Breaking Bad",
+            "Game Of Thrones": "Game of Thrones",
+            "The Walking Dead": "The Walking Dead",
+            "Better Call Saul": "Better Call Saul",
+        }
+        
+        for key, value in show_mappings.items():
+            if show_name.lower() == key.lower():
+                variations.append(value)
         
         # Remove duplicates while preserving order
         seen = set()
         variations = [v for v in variations if not (v in seen or seen.add(v))]
         
+        # Try exact search first
+        results = self.tmdb.search_tv_show(show_name)
+        
+        if results:
+            print(f"✓ Found: {results[0].get('name')}")
+            return results[0].get("id")
+        
+        # Try variations
         for variant in variations:
             if variant == show_name:
                 continue
             print(f"  Trying variation: '{variant}'")
             results = self.tmdb.search_tv_show(variant)
             if results:
-                print(f"  Found with variation: '{variant}' -> {results[0].get('name')}")
+                found_name = results[0].get('name')
+                print(f"  ✓ Found: '{found_name}'")
                 return results[0].get("id")
         
-        print(f"Could not find show: '{show_name}'")
+        print(f"✗ Could not find show: '{show_name}'")
         return None
 
     def get_imdb_id(self, show_id: int) -> Optional[str]:
@@ -391,7 +405,7 @@ class SmartMatcher:
 
         # Remove common quality tags
         clean_name = re.sub(
-            r"\b(480p|720p|1080p|2160p|WEBRip|WEB-DL|BluRay|HDRip|BRRip)\b",
+            r"\b(480p|720p|1080p|2160p|WEBRip|WEB-DL|BluRay|HDRip|BRRip|YIFY|YTS|RARBG)\b",
             "",
             name,
             flags=re.IGNORECASE
@@ -440,7 +454,7 @@ class SmartMatcher:
         
         # Remove common video tags
         name = re.sub(
-            r"\b(480p|720p|1080p|2160p|WEBRip|WEB-DL|BluRay|HDRip|BRRip|REPACK|PROPER|x264|x265|HEVC)\b",
+            r"\b(480p|720p|1080p|2160p|WEBRip|WEB-DL|BluRay|HDRip|BRRip|REPACK|PROPER|x264|x265|HEVC|YIFY|YTS|RARBG|EZTV)\b",
             "",
             name,
             flags=re.IGNORECASE
@@ -449,6 +463,13 @@ class SmartMatcher:
         # Remove group names in brackets or parentheses
         name = re.sub(r"\s*\[.*?\]\s*", "", name)
         name = re.sub(r"\s*\{.*?\}\s*", "", name)
+        
+        # Remove release year if it's at the end
+        name = re.sub(r"\s*\(\d{4}\)\s*$", "", name)
+        name = re.sub(r"\s*\d{4}\s*$", "", name)
+        
+        # Remove "Unrated", "Director's Cut", etc.
+        name = re.sub(r"\b(Unrated|Director's? Cut|Extended|Ultimate|Final|Special Edition)\b", "", name, flags=re.IGNORECASE)
         
         # Remove extra spaces
         name = re.sub(r"\s+", " ", name).strip()
