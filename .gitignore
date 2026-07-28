@@ -216,3 +216,17 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# SubtitleMatcher release files
+installer_output/
+test_extract/
+
+# Portable releases
+*_portable.zip
+*.zip
+
+# Built executables
+*.exe
+
+# Inno Setup outputs
+Output/
