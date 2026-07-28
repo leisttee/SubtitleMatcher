@@ -140,7 +140,7 @@ class SmartMatcher:
 
     def _clean_show_name(self, name: str) -> str:
         """
-        Clean show name - improved version.
+        Clean show name - improved version with smart capitalization.
         """
         # Replace dots, underscores, hyphens with spaces
         name = re.sub(r"[._-]+", " ", name)
@@ -170,14 +170,90 @@ class SmartMatcher:
         # Remove extra spaces and trim
         name = re.sub(r"\s+", " ", name).strip()
         
-        # Capitalize properly (each word)
-        name = " ".join(word.capitalize() for word in name.split())
+        # Smart capitalization - keep common words lowercase in titles
+        words = name.split()
+        if words:
+            # Capitalize first word
+            words[0] = words[0].capitalize()
+            # For subsequent words, keep short words lowercase
+            short_words = {"the", "and", "of", "for", "with", "on", "at", "by", "in", "a", "an", "to", "from", "up", "down", "off", "over", "under", "after", "before", "between", "through", "during", "without", "against", "among", "upon", "toward"}
+            for i in range(1, len(words)):
+                word = words[i].lower()
+                if word not in short_words:
+                    words[i] = word.capitalize()
+                else:
+                    words[i] = word
+            name = " ".join(words)
         
         return name
 
+    def _generate_title_variations(self, title: str) -> List[str]:
+        """
+        Generate intelligent variations of a title for searching.
+        """
+        variations = []
+        title_lower = title.lower()
+        
+        # Original
+        variations.append(title)
+        
+        # Remove "The" from beginning
+        if title_lower.startswith("the "):
+            variations.append(title[4:])
+            variations.append(title[4:].strip())
+        
+        # Replace & with and / and with &
+        variations.append(title.replace(" & ", " and "))
+        variations.append(title.replace(" and ", " & "))
+        
+        # Remove apostrophes
+        variations.append(title.replace("'", ""))
+        
+        # Remove all special characters
+        variations.append(re.sub(r"[^a-zA-Z0-9 ]", "", title))
+        
+        # All lowercase
+        variations.append(title_lower)
+        
+        # Title case (first letter of each word capitalized)
+        variations.append(" ".join(word.capitalize() for word in title_lower.split()))
+        
+        # All uppercase
+        variations.append(title.upper())
+        
+        # Remove common words from the beginning
+        words = title_lower.split()
+        if len(words) > 2:
+            # Try without first word if it's common
+            common_start_words = {"the", "a", "an"}
+            if words[0] in common_start_words:
+                variations.append(" ".join(words[1:]))
+                variations.append(" ".join(words[1:]).capitalize())
+        
+        # Try removing words that might be part of quality tags
+        clean_title = re.sub(
+            r"\b(unrated|director's cut|extended|ultimate|final|special edition|remastered|uncut)\b",
+            "",
+            title,
+            flags=re.IGNORECASE
+        ).strip()
+        if clean_title != title:
+            variations.append(clean_title)
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        result = []
+        for v in variations:
+            v_clean = v.strip()
+            if v_clean and v_clean not in seen:
+                seen.add(v_clean)
+                result.append(v_clean)
+        
+        return result
+
     def find_show_id(self, show_name: str) -> Optional[int]:
         """
-        Search TMDB TV show ID with fallback options.
+        Search TMDB TV show ID with intelligent variations.
         """
         if not show_name:
             return None
@@ -186,57 +262,26 @@ class SmartMatcher:
         show_name = self._clean_show_name(show_name)
         print(f"Searching for: '{show_name}'")
         
-        # Common show name variations
-        variations = []
+        # Generate all variations
+        variations = self._generate_title_variations(show_name)
         
-        # Original
-        variations.append(show_name)
-        
-        # Remove "The" from beginning
-        if show_name.lower().startswith("the "):
-            variations.append(show_name[4:])
-        
-        # Replace & with and
-        variations.append(show_name.replace(" & ", " and "))
-        variations.append(show_name.replace(" and ", " & "))
-        
-        # Remove apostrophes
-        variations.append(show_name.replace("'", ""))
-        
-        # Special cases for common shows
-        show_mappings = {
-            "Jane The Virgin": "Jane the Virgin",
-            "Jane the virgin": "Jane the Virgin",
-            "Breaking Bad": "Breaking Bad",
-            "Game Of Thrones": "Game of Thrones",
-            "The Walking Dead": "The Walking Dead",
-            "Better Call Saul": "Better Call Saul",
-        }
-        
-        for key, value in show_mappings.items():
-            if show_name.lower() == key.lower():
-                variations.append(value)
-        
-        # Remove duplicates while preserving order
-        seen = set()
-        variations = [v for v in variations if not (v in seen or seen.add(v))]
-        
-        # Try exact search first
+        # Try exact search first with original name
         results = self.tmdb.search_tv_show(show_name)
-        
         if results:
             print(f"✓ Found: {results[0].get('name')}")
             return results[0].get("id")
         
-        # Try variations
+        # Try all variations
+        tried = set()
         for variant in variations:
-            if variant == show_name:
+            if variant == show_name or variant in tried:
                 continue
+            tried.add(variant)
             print(f"  Trying variation: '{variant}'")
             results = self.tmdb.search_tv_show(variant)
             if results:
                 found_name = results[0].get('name')
-                print(f"  ✓ Found: '{found_name}'")
+                print(f"  ✓ Found: '{found_name}' (using variation '{variant}')")
                 return results[0].get("id")
         
         print(f"✗ Could not find show: '{show_name}'")
@@ -481,17 +526,39 @@ class SmartMatcher:
 
     def find_movie_id(self, title: str, year: Optional[int] = None) -> Optional[int]:
         """
-        Search TMDB movie ID.
+        Search TMDB movie ID with intelligent variations.
         """
         if not title:
             return None
-            
+        
+        # Clean the title
+        title = self._clean_movie_title(title)
+        print(f"Searching for movie: '{title}'")
+        
+        # Generate variations
+        variations = self._generate_title_variations(title)
+        
+        # Try exact search first
         results = self.tmdb.search_movie(title, year=year)
-
-        if not results:
-            return None
-
-        return results[0].get("id")
+        if results:
+            print(f"✓ Found: {results[0].get('title')}")
+            return results[0].get("id")
+        
+        # Try variations
+        tried = set()
+        for variant in variations:
+            if variant == title or variant in tried:
+                continue
+            tried.add(variant)
+            print(f"  Trying variation: '{variant}'")
+            results = self.tmdb.search_movie(variant, year=year)
+            if results:
+                found_title = results[0].get('title')
+                print(f"  ✓ Found: '{found_title}'")
+                return results[0].get("id")
+        
+        print(f"✗ Could not find movie: '{title}'")
+        return None
 
     def get_movie_imdb_id(self, movie_id: int) -> Optional[str]:
         """
