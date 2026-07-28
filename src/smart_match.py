@@ -2,6 +2,7 @@ import re
 from pathlib import Path
 from typing import List, Dict, Optional
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 
 from config import Config
 from api_clients.opensubtitles import OpenSubtitlesClient
@@ -34,6 +35,103 @@ class SmartMatcher:
         self.tmdb = TMDBClient(
             Config.TMDB_API_KEY
         )
+
+    # === SIMILARITY AND SELECTION METHODS ===
+
+    def _similarity(self, a: str, b: str) -> float:
+        """
+        Calculate similarity between two strings.
+        Returns a float between 0.0 and 1.0.
+        """
+        return SequenceMatcher(None, a.lower(), b.lower()).ratio()
+
+    def _select_best_tv_result(self, query: str, results: List[Dict]) -> Optional[Dict]:
+        """
+        Select the best TV show result based on name similarity.
+        """
+        if not results:
+            return None
+
+        best_result = None
+        best_score = 0.0
+
+        for result in results:
+            result_name = result.get("name", "")
+            score = self._similarity(query, result_name)
+
+            if score > best_score:
+                best_score = score
+                best_result = result
+
+        if best_result:
+            print(f"  ✓ TMDB match: '{query}' -> '{best_result.get('name')}' (score: {best_score:.2f})")
+
+        return best_result
+
+    def _select_best_movie_result(self, title: str, year: Optional[int], results: List[Dict]) -> Optional[Dict]:
+        """
+        Select the best movie result based on title similarity and year.
+        """
+        if not results:
+            return None
+
+        best_result = None
+        best_score = 0.0
+
+        for result in results:
+            result_title = result.get("title", "")
+            score = self._similarity(title, result_title)
+
+            # Add bonus for matching year
+            result_year = result.get("release_date", "")[:4]
+            if year and result_year:
+                try:
+                    if int(year) == int(result_year):
+                        score += 0.3
+                        print(f"  Year match: {year} == {result_year}")
+                except ValueError:
+                    pass
+
+            if score > best_score:
+                best_score = score
+                best_result = result
+
+        if best_result:
+            print(f"  ✓ TMDB match: '{title}' -> '{best_result.get('title')}' (score: {best_score:.2f})")
+
+        return best_result
+
+    def _select_best_subtitle(self, subtitles: List[Dict]) -> Optional[Dict]:
+        """
+        Select the best subtitle from OpenSubtitles results.
+        Prefers hearing impaired subtitles and higher scores.
+        """
+        if not subtitles:
+            return None
+
+        best = None
+        best_score = -1
+
+        for subtitle in subtitles:
+            # Start with the subtitle's score
+            score = subtitle.get("score", 0)
+
+            # Bonus for hearing impaired subtitles
+            if subtitle.get("hearing_impaired"):
+                score += 10
+
+            # Bonus for higher download count (more popular)
+            downloads = subtitle.get("download_count", 0)
+            score += min(downloads / 1000, 5)  # Max 5 points for downloads
+
+            if score > best_score:
+                best_score = score
+                best = subtitle
+
+        if best:
+            print(f"  ✓ Subtitle selected: score={best_score:.1f}, hearing_impaired={best.get('hearing_impaired', False)}")
+
+        return best
 
     # === TV SERIES METHODS ===
 
@@ -100,8 +198,8 @@ class SmartMatcher:
             # Show.Name.S03E03E04
             r"(.+?)[\s._-]+S(\d{1,2})E(\d{1,2})E\d{1,2}",
 
-            # Show.Name.303
-            r"(.+?)[\s._-]+(\d)(\d{2})",
+            # Show.Name.303 - Removed because it causes false positives
+            # r"(.+?)[\s._-]+(\d)(\d{2})",
         ]
 
         for pattern in patterns:
@@ -253,7 +351,7 @@ class SmartMatcher:
 
     def find_show_id(self, show_name: str) -> Optional[int]:
         """
-        Search TMDB TV show ID with intelligent variations.
+        Search TMDB TV show ID with intelligent variations and similarity scoring.
         """
         if not show_name:
             return None
@@ -268,8 +366,9 @@ class SmartMatcher:
         # Try exact search first with original name
         results = self.tmdb.search_tv_show(show_name)
         if results:
-            print(f"✓ Found: {results[0].get('name')}")
-            return results[0].get("id")
+            best = self._select_best_tv_result(show_name, results)
+            if best:
+                return best.get("id")
         
         # Try all variations
         tried = set()
@@ -280,9 +379,9 @@ class SmartMatcher:
             print(f"  Trying variation: '{variant}'")
             results = self.tmdb.search_tv_show(variant)
             if results:
-                found_name = results[0].get('name')
-                print(f"  ✓ Found: '{found_name}' (using variation '{variant}')")
-                return results[0].get("id")
+                best = self._select_best_tv_result(variant, results)
+                if best:
+                    return best.get("id")
         
         print(f"✗ Could not find show: '{show_name}'")
         return None
@@ -316,7 +415,10 @@ class SmartMatcher:
         if not subtitles:
             return None
 
-        subtitle_data = subtitles[0]
+        # Select best subtitle
+        subtitle_data = self._select_best_subtitle(subtitles)
+        if not subtitle_data:
+            return None
 
         file_info = self.opensubtitles.get_subtitle_file(
             subtitle_data
@@ -526,7 +628,7 @@ class SmartMatcher:
 
     def find_movie_id(self, title: str, year: Optional[int] = None) -> Optional[int]:
         """
-        Search TMDB movie ID with intelligent variations.
+        Search TMDB movie ID with intelligent variations and similarity scoring.
         """
         if not title:
             return None
@@ -541,8 +643,9 @@ class SmartMatcher:
         # Try exact search first
         results = self.tmdb.search_movie(title, year=year)
         if results:
-            print(f"✓ Found: {results[0].get('title')}")
-            return results[0].get("id")
+            best = self._select_best_movie_result(title, year, results)
+            if best:
+                return best.get("id")
         
         # Try variations
         tried = set()
@@ -553,9 +656,9 @@ class SmartMatcher:
             print(f"  Trying variation: '{variant}'")
             results = self.tmdb.search_movie(variant, year=year)
             if results:
-                found_title = results[0].get('title')
-                print(f"  ✓ Found: '{found_title}'")
-                return results[0].get("id")
+                best = self._select_best_movie_result(variant, year, results)
+                if best:
+                    return best.get("id")
         
         print(f"✗ Could not find movie: '{title}'")
         return None
@@ -603,8 +706,11 @@ class SmartMatcher:
             print(f"No subtitles found for: {movie_info.title}")
             return None
 
-        # Get best subtitle (prefer hearing impaired if available, else first)
-        subtitle_data = self._get_best_subtitle(subtitles)
+        # Get best subtitle
+        subtitle_data = self._select_best_subtitle(subtitles)
+
+        if not subtitle_data:
+            return None
 
         file_info = self.opensubtitles.get_subtitle_file(
             subtitle_data
@@ -636,28 +742,6 @@ class SmartMatcher:
             f.write(content)
 
         return output_file
-
-    def _get_best_subtitle(self, subtitles: List[Dict]) -> Dict:
-        """
-        Select best subtitle from list.
-        Prefers hearing impaired subtitles, then standard.
-        """
-        # First try to find hearing impaired
-        for sub in subtitles:
-            if sub.get("hearing_impaired"):
-                return sub
-        
-        # Then try to find one with good score
-        best = subtitles[0]
-        best_score = 0
-        
-        for sub in subtitles:
-            score = sub.get("score", 0)
-            if score > best_score:
-                best_score = score
-                best = sub
-                
-        return best
 
     def match_all_movies(
         self,
