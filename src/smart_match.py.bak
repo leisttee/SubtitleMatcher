@@ -1,6 +1,5 @@
 # smart_match.py
 import re
-import requests
 from pathlib import Path
 from typing import List, Dict, Optional
 from dataclasses import dataclass
@@ -9,7 +8,6 @@ from difflib import SequenceMatcher
 from config import Config
 from api_clients.opensubtitles import OpenSubtitlesClient
 from api_clients.tmdb import TMDBClient
-from api_clients.subdl import SubDLClient
 
 
 @dataclass
@@ -31,25 +29,36 @@ class MovieInfo:
 
 class SmartMatcher:
     def __init__(self):
+        # Load config
         Config.load()
         
-        self.opensubtitles = OpenSubtitlesClient(Config.OPENSUBTITLES_API_KEY)
-        self.subdl = SubDLClient(Config.SUBDL_API_KEY)
-        self.tmdb = TMDBClient(Config.TMDB_API_KEY)
+        self.opensubtitles = OpenSubtitlesClient(
+            Config.OPENSUBTITLES_API_KEY
+        )
         
         if not Config.OPENSUBTITLES_API_KEY:
             print("⚠️ OpenSubtitles API key is empty!")
-        if not Config.SUBDL_API_KEY:
-            print("⚠️ SubDL API key is empty!")
+        
+        self.tmdb = TMDBClient(
+            Config.TMDB_API_KEY
+        )
+        
         if not Config.TMDB_API_KEY:
             print("⚠️ TMDB API key is empty!")
 
     # === SIMILARITY AND SELECTION METHODS ===
 
     def _similarity(self, a: str, b: str) -> float:
+        """
+        Calculate similarity between two strings.
+        Returns a float between 0.0 and 1.0.
+        """
         return SequenceMatcher(None, a.lower(), b.lower()).ratio()
 
     def _select_best_tv_result(self, query: str, results: List[Dict]) -> Optional[Dict]:
+        """
+        Select the best TV show result based on name similarity.
+        """
         if not results:
             return None
 
@@ -70,6 +79,9 @@ class SmartMatcher:
         return best_result
 
     def _select_best_movie_result(self, title: str, year: Optional[int], results: List[Dict]) -> Optional[Dict]:
+        """
+        Select the best movie result based on title similarity and year.
+        """
         if not results:
             return None
 
@@ -80,6 +92,7 @@ class SmartMatcher:
             result_title = result.get("title", "")
             score = self._similarity(title, result_title)
 
+            # Add bonus for matching year
             result_year = result.get("release_date", "")[:4]
             if year and result_year:
                 try:
@@ -99,6 +112,10 @@ class SmartMatcher:
         return best_result
 
     def _select_best_subtitle(self, subtitles: List[Dict]) -> Optional[Dict]:
+        """
+        Select the best subtitle from OpenSubtitles results.
+        Prefers hearing impaired subtitles and higher scores.
+        """
         if not subtitles:
             return None
 
@@ -106,26 +123,32 @@ class SmartMatcher:
         best_score = -1
 
         for subtitle in subtitles:
+            # Start with the subtitle's score
             score = subtitle.get("score", 0)
 
+            # Bonus for hearing impaired subtitles
             if subtitle.get("hearing_impaired"):
                 score += 10
 
+            # Bonus for higher download count (more popular)
             downloads = subtitle.get("download_count", 0)
-            score += min(downloads / 1000, 5)
+            score += min(downloads / 1000, 5)  # Max 5 points for downloads
 
             if score > best_score:
                 best_score = score
                 best = subtitle
 
         if best:
-            print(f"  ✓ Subtitle selected: score={best_score:.1f}")
+            print(f"  ✓ Subtitle selected: score={best_score:.1f}, hearing_impaired={best.get('hearing_impaired', False)}")
 
         return best
 
     # === TV SERIES METHODS ===
 
     def scan_video_library(self, library_path: str) -> List[EpisodeInfo]:
+        """
+        Scan video library and return list of found episodes.
+        """
         episodes = []
         library = Path(library_path)
 
@@ -153,6 +176,7 @@ class SmartMatcher:
                 episode_info.file_path = video_file
                 episodes.append(episode_info)
             else:
+                # Try parsing as movie if TV parse fails
                 movie_info = self._parse_movie_filename(video_file.name)
                 if movie_info:
                     print(f"  (This looks like a movie: {movie_info.title})")
@@ -164,25 +188,49 @@ class SmartMatcher:
         return episodes
 
     def _parse_tv_filename(self, filename: str) -> Optional[EpisodeInfo]:
+        """
+        Parse TV episode filename.
+        Supports:
+        - Jane.The.Virgin.S03E03
+        - Jane_the_Virgin_S03E03
+        - Jane-the-Virgin-S03E03
+        - Jane the Virgin 3x03
+        """
         name = Path(filename).stem
 
         patterns = [
+            # Jane the Virgin S03E03
             r"(.+?)[\s._-]+S(\d{1,2})E(\d{1,2})",
+
+            # Jane the Virgin 3x03
             r"(.+?)[\s._-]+(\d{1,2})x(\d{1,2})",
+
+            # Show.Name.S03E03E04
             r"(.+?)[\s._-]+S(\d{1,2})E(\d{1,2})E\d{1,2}",
+
+            # Show.Name.303 - Removed because it causes false positives
+            # r"(.+?)[\s._-]+(\d)(\d{2})",
         ]
 
         for pattern in patterns:
-            match = re.search(pattern, name, re.IGNORECASE)
+            match = re.search(
+                pattern,
+                name,
+                re.IGNORECASE
+            )
 
             if not match:
                 continue
 
             try:
-                show_name = self._clean_show_name(match.group(1))
+                show_name = self._clean_show_name(
+                    match.group(1)
+                )
+
                 season = int(match.group(2))
                 episode = int(match.group(3))
 
+                # Make sure season/episode are reasonable
                 if season > 30 or episode > 100:
                     continue
 
@@ -199,25 +247,44 @@ class SmartMatcher:
         return None
 
     def _clean_show_name(self, name: str) -> str:
+        """
+        Clean show name - improved version with smart capitalization.
+        """
+        # Replace dots, underscores, hyphens with spaces
         name = re.sub(r"[._-]+", " ", name)
+        
+        # Remove extra spaces
         name = re.sub(r"\s+", " ", name).strip()
+        
+        # Remove year (1900-2099)
         name = re.sub(r"\b(19|20)\d{2}\b", "", name)
+        
+        # Remove common quality tags and release groups
         name = re.sub(
             r"\b(480p|720p|1080p|2160p|WEBRip|WEB-DL|BluRay|HDRip|BRRip|REPACK|PROPER|x264|x265|HEVC|H\.264|H\.265|AC3|DTS|AAC|MP3|DD5\.1|Dual|Audio|Multi|Sub|Fix|DVD|BDRip|WEB|DL|Rip|HC|HDTV|TV|Season|Complete|AMZN|NF|HMAX|iT|WEB|RARBG|EZTV|YIFY|YTS|TBS|E?ZTV|XVID|DIVX|AVC|REMUX)\b",
             "",
             name,
             flags=re.IGNORECASE
         )
+        
+        # Remove episode patterns (S01E01, 1x01, etc.)
         name = re.sub(r"\bS\d{1,2}E\d{1,2}\b", "", name, flags=re.IGNORECASE)
         name = re.sub(r"\b\d{1,2}x\d{1,2}\b", "", name)
+        
+        # Remove common words in brackets/parentheses
         name = re.sub(r"\s*\[.*?\]\s*", " ", name)
         name = re.sub(r"\s*\(.*?\)\s*", " ", name)
+        
+        # Remove extra spaces and trim
         name = re.sub(r"\s+", " ", name).strip()
         
+        # Smart capitalization - keep common words lowercase in titles
         words = name.split()
         if words:
+            # Capitalize first word
             words[0] = words[0].capitalize()
-            short_words = {"the", "and", "of", "for", "with", "on", "at", "by", "in", "a", "an", "to", "from"}
+            # For subsequent words, keep short words lowercase
+            short_words = {"the", "and", "of", "for", "with", "on", "at", "by", "in", "a", "an", "to", "from", "up", "down", "off", "over", "under", "after", "before", "between", "through", "during", "without", "against", "among", "upon", "toward"}
             for i in range(1, len(words)):
                 word = words[i].lower()
                 if word not in short_words:
@@ -229,30 +296,49 @@ class SmartMatcher:
         return name
 
     def _generate_title_variations(self, title: str) -> List[str]:
+        """
+        Generate intelligent variations of a title for searching.
+        """
         variations = []
         title_lower = title.lower()
         
+        # Original
         variations.append(title)
         
+        # Remove "The" from beginning
         if title_lower.startswith("the "):
             variations.append(title[4:])
             variations.append(title[4:].strip())
         
+        # Replace & with and / and with &
         variations.append(title.replace(" & ", " and "))
         variations.append(title.replace(" and ", " & "))
+        
+        # Remove apostrophes
         variations.append(title.replace("'", ""))
+        
+        # Remove all special characters
         variations.append(re.sub(r"[^a-zA-Z0-9 ]", "", title))
+        
+        # All lowercase
         variations.append(title_lower)
+        
+        # Title case (first letter of each word capitalized)
         variations.append(" ".join(word.capitalize() for word in title_lower.split()))
+        
+        # All uppercase
         variations.append(title.upper())
         
+        # Remove common words from the beginning
         words = title_lower.split()
         if len(words) > 2:
+            # Try without first word if it's common
             common_start_words = {"the", "a", "an"}
             if words[0] in common_start_words:
                 variations.append(" ".join(words[1:]))
                 variations.append(" ".join(words[1:]).capitalize())
         
+        # Try removing words that might be part of quality tags
         clean_title = re.sub(
             r"\b(unrated|director's cut|extended|ultimate|final|special edition|remastered|uncut)\b",
             "",
@@ -262,6 +348,7 @@ class SmartMatcher:
         if clean_title != title:
             variations.append(clean_title)
         
+        # Remove duplicates while preserving order
         seen = set()
         result = []
         for v in variations:
@@ -273,20 +360,27 @@ class SmartMatcher:
         return result
 
     def find_show_id(self, show_name: str) -> Optional[int]:
+        """
+        Search TMDB TV show ID with intelligent variations and similarity scoring.
+        """
         if not show_name:
             return None
             
+        # Clean the name first
         show_name = self._clean_show_name(show_name)
         print(f"Searching for: '{show_name}'")
         
+        # Generate all variations
         variations = self._generate_title_variations(show_name)
         
+        # Try exact search first with original name
         results = self.tmdb.search_tv_show(show_name)
         if results:
             best = self._select_best_tv_result(show_name, results)
             if best:
                 return best.get("id")
         
+        # Try all variations
         tried = set()
         for variant in variations:
             if variant == show_name or variant in tried:
@@ -303,50 +397,11 @@ class SmartMatcher:
         return None
 
     def get_imdb_id(self, show_id: int) -> Optional[str]:
+        """
+        Get IMDb ID from TMDB.
+        """
         external_ids = self.tmdb.get_external_ids(show_id)
         return external_ids.get("imdb_id")
-
-    def get_show_details(self, show_id: int) -> Optional[Dict]:
-        """Get TV show details from TMDB including rating, description, poster."""
-        try:
-            details = self.tmdb.get_show_details(show_id)
-            if details:
-                return {
-                    "title": details.get("name"),
-                    "year": details.get("first_air_date", "")[:4],
-                    "rating": details.get("vote_average"),
-                    "rating_count": details.get("vote_count"),
-                    "overview": details.get("overview"),
-                    "poster_path": details.get("poster_path"),
-                    "poster_url": details.get("poster_url"),
-                    "backdrop_url": details.get("backdrop_url"),
-                    "genres": [g.get("name") for g in details.get("genres", [])],
-                    "seasons": len(details.get("seasons", []))
-                }
-        except Exception as e:
-            print(f"Error getting show details: {e}")
-        return None
-
-    def get_movie_details(self, movie_id: int) -> Optional[Dict]:
-        """Get movie details from TMDB including rating, description, poster."""
-        try:
-            details = self.tmdb.get_movie_details(movie_id)
-            if details:
-                return {
-                    "title": details.get("title"),
-                    "year": details.get("release_date", "")[:4],
-                    "rating": details.get("vote_average"),
-                    "rating_count": details.get("vote_count"),
-                    "overview": details.get("overview"),
-                    "poster_path": details.get("poster_path"),
-                    "poster_url": details.get("poster_url"),
-                    "backdrop_url": details.get("backdrop_url"),
-                    "genres": [g.get("name") for g in details.get("genres", [])],
-                    "runtime": details.get("runtime")
-                }
-        except Exception as e:
-            print(f"Error getting movie details: {e}")
-        return None
 
     def download_subtitles_for_episode(
         self,
@@ -354,12 +409,17 @@ class SmartMatcher:
         imdb_id: str,
         language: str = None
     ) -> Optional[Path]:
+        """
+        Download subtitles for a single episode.
+        Tries multiple search strategies.
+        """
         if language is None:
             language = episode_info.language
 
         subtitles = None
         strategies = []
         
+        # Strategy 1: IMDB + Season + Episode
         strategies.append({
             "name": f"IMDB + Season {episode_info.season} + Episode {episode_info.episode}",
             "params": {
@@ -370,6 +430,7 @@ class SmartMatcher:
             }
         })
         
+        # Strategy 2: IMDB + Season (no episode)
         strategies.append({
             "name": f"IMDB + Season {episode_info.season} (no episode)",
             "params": {
@@ -379,6 +440,7 @@ class SmartMatcher:
             }
         })
         
+        # Strategy 3: Query with show name and episode
         query = f"{episode_info.show_name} S{episode_info.season:02d}E{episode_info.episode:02d}"
         strategies.append({
             "name": f"Query: '{query}'",
@@ -388,6 +450,7 @@ class SmartMatcher:
             }
         })
         
+        # Strategy 4: Query with show name and season (no episode)
         query2 = f"{episode_info.show_name} Season {episode_info.season}"
         strategies.append({
             "name": f"Query: '{query2}'",
@@ -397,40 +460,11 @@ class SmartMatcher:
             }
         })
 
-        # 1. Try SubDL first (v1 API)
-        print(f"  Trying SubDL (primary)...")
-        subdl_results = self.subdl.search_subtitles(
-            imdb_id=imdb_id,
-            season=episode_info.season,
-            episode=episode_info.episode,
-            language=language
-        )
-        
-        if subdl_results:
-            # Ota ensimmäinen tekstitys
-            sub = subdl_results[0]
-            # v1 API uses 'url' field
-            subtitle_url = sub.get("url")
-            
-            if subtitle_url:
-                print(f"  ✅ SubDL found subtitle: {subtitle_url}")
-                content = self.subdl.download_subtitle_by_url(subtitle_url)
-                if content:
-                    output_file = episode_info.file_path.parent / f"{episode_info.file_path.stem}.{language}.srt"
-                    with open(output_file, "wb") as f:
-                        f.write(content)
-                    print(f"  ✅ Downloaded: {output_file.name}")
-                    return output_file
-                else:
-                    print(f"  ❌ SubDL download failed")
-            else:
-                print(f"  ❌ No url found in SubDL result")
-
-        # 2. Fallback to OpenSubtitles
-        print(f"  Trying OpenSubtitles (fallback)...")
+        # Try each strategy
         for strategy in strategies:
             print(f"  Trying: {strategy['name']}")
             
+            # Search with strategy parameters
             subtitles = self.opensubtitles.search_subtitles(**strategy['params'])
             
             if subtitles:
@@ -443,24 +477,36 @@ class SmartMatcher:
             print(f"  ❌ No subtitles found for episode {episode_info.episode}")
             return None
 
+        # Select best subtitle
         subtitle_data = self._select_best_subtitle(subtitles)
         if not subtitle_data:
             return None
 
-        file_info = self.opensubtitles.get_subtitle_file(subtitle_data)
+        file_info = self.opensubtitles.get_subtitle_file(
+            subtitle_data
+        )
+
         if not file_info:
             return None
 
         file_id = file_info.get("file_id")
+
         if not file_id:
             return None
 
-        content = self.opensubtitles.download_subtitle(file_id)
+        content = self.opensubtitles.download_subtitle(
+            file_id
+        )
+
         if not content:
             return None
 
         output_dir = episode_info.file_path.parent
-        output_file = output_dir / f"{episode_info.file_path.stem}.{language}.srt"
+
+        output_file = (
+            output_dir /
+            f"{episode_info.file_path.stem}.{language}.srt"
+        )
 
         with open(output_file, "wb") as f:
             f.write(content)
@@ -473,7 +519,12 @@ class SmartMatcher:
         library_path: str,
         language: str = "en"
     ) -> Dict[Path, Path]:
-        episodes = self.scan_video_library(library_path)
+        """
+        Match all episodes and download subtitles.
+        """
+        episodes = self.scan_video_library(
+            library_path
+        )
 
         if not episodes:
             print("No episodes found in library")
@@ -519,6 +570,9 @@ class SmartMatcher:
     # === MOVIE METHODS ===
 
     def scan_movie_library(self, library_path: str) -> List[MovieInfo]:
+        """
+        Scan video library for movies.
+        """
         movies = []
         library = Path(library_path)
 
@@ -549,8 +603,17 @@ class SmartMatcher:
         return movies
 
     def _parse_movie_filename(self, filename: str) -> Optional[MovieInfo]:
+        """
+        Parse movie filename.
+        Supports:
+        - Movie Name 2023.mp4
+        - Movie.Name.2023.mkv
+        - Movie Name (2023).mp4
+        - Movie.Name.2023.1080p.BluRay.mkv
+        """
         name = Path(filename).stem
 
+        # Remove common quality tags
         clean_name = re.sub(
             r"\b(480p|720p|1080p|2160p|WEBRip|WEB-DL|BluRay|HDRip|BRRip|YIFY|YTS|RARBG)\b",
             "",
@@ -558,6 +621,7 @@ class SmartMatcher:
             flags=re.IGNORECASE
         )
 
+        # Try to find year in parentheses: "Movie Name (2023)"
         year_match = re.search(r"\((\d{4})\)", clean_name)
         if year_match:
             year = int(year_match.group(1))
@@ -566,6 +630,7 @@ class SmartMatcher:
             if title:
                 return MovieInfo(title=title, year=year, file_path=Path(""))
 
+        # Try to find year: "Movie Name 2023" or "Movie.Name.2023"
         year_match = re.search(r"[\s._-](\d{4})$", clean_name)
         if year_match:
             year = int(year_match.group(1))
@@ -574,49 +639,78 @@ class SmartMatcher:
             if title:
                 return MovieInfo(title=title, year=year, file_path=Path(""))
 
+        # No year found, just use the title
         title = self._clean_movie_title(clean_name)
         
+        # Check if it has valid movie patterns (e.g., not "S01E01" pattern)
         if re.search(r"S\d{1,2}E\d{1,2}", title, re.IGNORECASE):
             return None
             
+        # Skip if title is too short or looks like a TV show
         if len(title) < 2:
             return None
             
         return MovieInfo(title=title, year=None, file_path=Path(""))
 
     def _clean_movie_title(self, name: str) -> str:
+        """
+        Clean movie title.
+        """
+        # Replace dots and underscores with spaces
         name = re.sub(r"[._]", " ", name)
+        
+        # Remove extra spaces
         name = re.sub(r"\s+", " ", name).strip()
+        
+        # Remove common video tags
         name = re.sub(
             r"\b(480p|720p|1080p|2160p|WEBRip|WEB-DL|BluRay|HDRip|BRRip|REPACK|PROPER|x264|x265|HEVC|YIFY|YTS|RARBG|EZTV)\b",
             "",
             name,
             flags=re.IGNORECASE
         )
+        
+        # Remove group names in brackets or parentheses
         name = re.sub(r"\s*\[.*?\]\s*", "", name)
         name = re.sub(r"\s*\{.*?\}\s*", "", name)
+        
+        # Remove release year if it's at the end
         name = re.sub(r"\s*\(\d{4}\)\s*$", "", name)
         name = re.sub(r"\s*\d{4}\s*$", "", name)
+        
+        # Remove "Unrated", "Director's Cut", etc.
         name = re.sub(r"\b(Unrated|Director's? Cut|Extended|Ultimate|Final|Special Edition)\b", "", name, flags=re.IGNORECASE)
+        
+        # Remove extra spaces
         name = re.sub(r"\s+", " ", name).strip()
+        
+        # Capitalize properly
         name = " ".join(word.capitalize() for word in name.split())
+        
         return name
 
     def find_movie_id(self, title: str, year: Optional[int] = None) -> Optional[int]:
+        """
+        Search TMDB movie ID with intelligent variations and similarity scoring.
+        """
         if not title:
             return None
         
+        # Clean the title
         title = self._clean_movie_title(title)
         print(f"Searching for movie: '{title}'")
         
+        # Generate variations
         variations = self._generate_title_variations(title)
         
+        # Try exact search first
         results = self.tmdb.search_movie(title, year=year)
         if results:
             best = self._select_best_movie_result(title, year, results)
             if best:
                 return best.get("id")
         
+        # Try variations
         tried = set()
         for variant in variations:
             if variant == title or variant in tried:
@@ -633,6 +727,9 @@ class SmartMatcher:
         return None
 
     def get_movie_imdb_id(self, movie_id: int) -> Optional[str]:
+        """
+        Get IMDb ID for a movie from TMDB.
+        """
         external_ids = self.tmdb.get_movie_external_ids(movie_id)
         return external_ids.get("imdb_id")
 
@@ -641,14 +738,19 @@ class SmartMatcher:
         movie_info: MovieInfo,
         language: str = "en"
     ) -> Optional[Path]:
+        """
+        Download subtitles for a movie.
+        """
         print(f"Searching for movie: {movie_info.title}")
         
+        # Search for movie ID
         movie_id = self.find_movie_id(movie_info.title, movie_info.year)
         
         if not movie_id:
             print(f"Could not find movie: {movie_info.title}")
             return None
             
+        # Get IMDb ID
         imdb_id = self.get_movie_imdb_id(movie_id)
         
         if not imdb_id:
@@ -657,100 +759,51 @@ class SmartMatcher:
             
         print(f"IMDB ID: {imdb_id}")
         
-        # 1. Try SubDL first (v1 API)
-        print(f"  Trying SubDL (primary)...")
-        subdl_results = self.subdl.search_subtitles(
+        # Search for subtitles
+        subtitles = self.opensubtitles.search_subtitles(
             imdb_id=imdb_id,
             language=language
         )
-        
-        if subdl_results:
-            sub = subdl_results[0]
-            subtitle_url = sub.get("url")
-            
-            if subtitle_url:
-                print(f"  ✅ SubDL found subtitle: {subtitle_url}")
-                content = self.subdl.download_subtitle_by_url(subtitle_url)
-                if content:
-                    output_file = movie_info.file_path.parent / f"{movie_info.file_path.stem}.{language}.srt"
-                    with open(output_file, "wb") as f:
-                        f.write(content)
-                    print(f"  ✅ Downloaded: {output_file.name}")
-                    return output_file
-                else:
-                    print(f"  ❌ SubDL download failed")
-            else:
-                print(f"  ❌ No url found in SubDL result")
-
-        # 2. Fallback to OpenSubtitles
-        print(f"  Trying OpenSubtitles (fallback)...")
-        subtitles = None
-        strategies = []
-        
-        strategies.append({
-            "name": f"IMDB ID: {imdb_id}",
-            "params": {
-                "imdb_id": imdb_id,
-                "language": language
-            }
-        })
-        
-        if movie_info.year:
-            query = f"{movie_info.title} {movie_info.year}"
-            strategies.append({
-                "name": f"Query: '{query}'",
-                "params": {
-                    "query": query,
-                    "language": language
-                }
-            })
-        
-        strategies.append({
-            "name": f"Query: '{movie_info.title}'",
-            "params": {
-                "query": movie_info.title,
-                "language": language
-            }
-        })
-
-        for strategy in strategies:
-            print(f"  Trying: {strategy['name']}")
-            
-            subtitles = self.opensubtitles.search_subtitles(**strategy['params'])
-            
-            if subtitles:
-                print(f"  ✅ Found {len(subtitles)} subtitles")
-                break
-            else:
-                print(f"  ❌ No results")
 
         if not subtitles:
             print(f"No subtitles found for: {movie_info.title}")
             return None
 
+        # Get best subtitle
         subtitle_data = self._select_best_subtitle(subtitles)
+
         if not subtitle_data:
             return None
 
-        file_info = self.opensubtitles.get_subtitle_file(subtitle_data)
+        file_info = self.opensubtitles.get_subtitle_file(
+            subtitle_data
+        )
+
         if not file_info:
             return None
 
         file_id = file_info.get("file_id")
+
         if not file_id:
             return None
 
-        content = self.opensubtitles.download_subtitle(file_id)
+        content = self.opensubtitles.download_subtitle(
+            file_id
+        )
+
         if not content:
             return None
 
         output_dir = movie_info.file_path.parent
-        output_file = output_dir / f"{movie_info.file_path.stem}.{language}.srt"
+
+        output_file = (
+            output_dir /
+            f"{movie_info.file_path.stem}.{language}.srt"
+        )
 
         with open(output_file, "wb") as f:
             f.write(content)
 
-        print(f"  ✅ Downloaded: {output_file.name}")
         return output_file
 
     def match_all_movies(
@@ -758,6 +811,9 @@ class SmartMatcher:
         library_path: str,
         language: str = "en"
     ) -> Dict[Path, Path]:
+        """
+        Match all movies and download subtitles.
+        """
         movies = self.scan_movie_library(library_path)
 
         if not movies:
@@ -785,9 +841,18 @@ class SmartMatcher:
     # === UTILITY METHODS ===
 
     def _is_video_file(self, file_path: Path) -> bool:
+        """
+        Check whether file is a video file.
+        """
         video_extensions = {
-            ".mp4", ".mkv", ".avi", ".mov",
-            ".wmv", ".flv", ".webm", ".m4v"
+            ".mp4",
+            ".mkv",
+            ".avi",
+            ".mov",
+            ".wmv",
+            ".flv",
+            ".webm",
+            ".m4v"
         }
 
         return file_path.suffix.lower() in video_extensions

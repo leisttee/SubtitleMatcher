@@ -1,5 +1,5 @@
 #define MyAppName "SubtitleMatcher"
-#define MyAppVersion "1.2.0"
+#define MyAppVersion "2.0.0"
 #define MyAppPublisher "Teemu Leisto"
 #define MyAppExeName "SubtitleMatcher.exe"
 
