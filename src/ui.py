@@ -3,9 +3,11 @@ import os
 import sys
 import threading
 import customtkinter as ctk
-
 from tkinter import filedialog, messagebox
 from pathlib import Path
+from PIL import Image, ImageTk
+import requests
+from io import BytesIO
 
 from scanner import scan_videos, scan_subtitles
 from matcher import find_matches
@@ -19,7 +21,7 @@ class SubtitleMatcherUI(ctk.CTk):
         super().__init__()
 
         self.title("SubtitleMatcher")
-        self.geometry("950x850")
+        self.geometry("1100x900")
 
         self.video_folder = ""
         self.subtitle_folder = ""
@@ -28,6 +30,8 @@ class SubtitleMatcherUI(ctk.CTk):
         self.smart_video_folder = ""
         self.smart_matcher = SmartMatcher()
         self.smart_results = {}
+        self.current_movie_info = None
+        self.current_poster = None
 
         self.base_dir = self.get_base_dir()
         self.env_path = self.base_dir / ".env"
@@ -38,18 +42,14 @@ class SubtitleMatcherUI(ctk.CTk):
         self.setup_window_icon()
         self.build_ui()
         self.load_settings()
+        
+        # Set default appearance
+        ctk.set_appearance_mode("dark")
+        ctk.set_default_color_theme("blue")
 
     def get_base_dir(self):
-        """
-        Development:
-            project root
-
-        PyInstaller exe:
-            folder where exe is located
-        """
         if getattr(sys, "frozen", False):
             return Path(sys.executable).resolve().parent
-
         return Path(__file__).resolve().parent.parent
 
     def setup_window_icon(self):
@@ -61,15 +61,131 @@ class SubtitleMatcherUI(ctk.CTk):
                 pass
 
     def build_ui(self):
-        self.title_label = ctk.CTkLabel(
-            self,
-            text="SubtitleMatcher",
-            font=("Segoe UI", 28, "bold")
-        )
-        self.title_label.pack(pady=(20, 10))
+        # Main container with two columns
+        self.main_container = ctk.CTkFrame(self)
+        self.main_container.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # Left column - Info panel
+        self.info_panel = ctk.CTkFrame(self.main_container, width=300)
+        self.info_panel.pack(side="left", fill="y", padx=(0, 10))
+        self.info_panel.pack_propagate(False)
+        
+        # Right column - Main content
+        self.content_panel = ctk.CTkFrame(self.main_container)
+        self.content_panel.pack(side="right", fill="both", expand=True)
+        
+        # Build info panel
+        self.build_info_panel()
+        
+        # Build main content
+        self.build_main_content()
 
-        self.tabview = ctk.CTkTabview(self)
-        self.tabview.pack(fill="both", expand=True, padx=20, pady=10)
+    def build_info_panel(self):
+        # Title
+        title_label = ctk.CTkLabel(
+            self.info_panel,
+            text="Movie Info",
+            font=("Segoe UI", 18, "bold")
+        )
+        title_label.pack(pady=(10, 5))
+        
+        # Poster frame
+        self.poster_frame = ctk.CTkFrame(self.info_panel, width=250, height=375)
+        self.poster_frame.pack(pady=10, padx=10)
+        self.poster_frame.pack_propagate(False)
+        
+        # Poster placeholder
+        self.poster_label = ctk.CTkLabel(
+            self.poster_frame,
+            text="🎬\nNo poster",
+            font=("Segoe UI", 24),
+            width=250,
+            height=375
+        )
+        self.poster_label.pack(fill="both", expand=True)
+        
+        # Movie title
+        self.movie_title_label = ctk.CTkLabel(
+            self.info_panel,
+            text="No movie selected",
+            font=("Segoe UI", 16, "bold"),
+            wraplength=280
+        )
+        self.movie_title_label.pack(pady=(5, 0))
+        
+        # Movie year
+        self.movie_year_label = ctk.CTkLabel(
+            self.info_panel,
+            text="",
+            font=("Segoe UI", 12)
+        )
+        self.movie_year_label.pack()
+        
+        # IMDb Rating
+        self.rating_frame = ctk.CTkFrame(self.info_panel)
+        self.rating_frame.pack(pady=5)
+        
+        self.rating_label = ctk.CTkLabel(
+            self.rating_frame,
+            text="⭐ N/A",
+            font=("Segoe UI", 14, "bold")
+        )
+        self.rating_label.pack(side="left", padx=5)
+        
+        self.vote_count_label = ctk.CTkLabel(
+            self.rating_frame,
+            text="(0 votes)",
+            font=("Segoe UI", 10)
+        )
+        self.vote_count_label.pack(side="left", padx=5)
+        
+        # Genres
+        self.genres_label = ctk.CTkLabel(
+            self.info_panel,
+            text="",
+            font=("Segoe UI", 11),
+            wraplength=280
+        )
+        self.genres_label.pack(pady=5)
+        
+        # Runtime
+        self.runtime_label = ctk.CTkLabel(
+            self.info_panel,
+            text="",
+            font=("Segoe UI", 11)
+        )
+        self.runtime_label.pack()
+        
+        # Overview
+        overview_label = ctk.CTkLabel(
+            self.info_panel,
+            text="Overview:",
+            font=("Segoe UI", 12, "bold")
+        )
+        overview_label.pack(pady=(10, 0))
+        
+        self.overview_text = ctk.CTkTextbox(
+            self.info_panel,
+            height=150,
+            width=280,
+            wrap="word"
+        )
+        self.overview_text.pack(pady=5, padx=10, fill="both")
+        self.overview_text.configure(state="disabled")
+        
+        # Status bar
+        self.status_label = ctk.CTkLabel(
+            self.info_panel,
+            text="Ready",
+            font=("Segoe UI", 10),
+            text_color="gray"
+        )
+        self.status_label.pack(pady=5)
+
+    def build_main_content(self):
+        # Tab view
+        self.tabview = ctk.CTkTabview(self.content_panel)
+        self.tabview.pack(fill="both", expand=True, padx=10, pady=10)
 
         self.tab_manual = self.tabview.add("Manual Match")
         self.tab_smart = self.tabview.add("Smart Match")
@@ -81,8 +197,6 @@ class SubtitleMatcherUI(ctk.CTk):
         self.build_settings_tab()
         self.build_help_tab()
         self.build_log_window()
-
-    # === MANUAL MATCH TAB ===
 
     def build_manual_tab(self):
         self.manual_frame = ctk.CTkFrame(self.tab_manual)
@@ -144,56 +258,54 @@ class SubtitleMatcherUI(ctk.CTk):
         )
         self.copy_button.pack(pady=5)
 
-    # === SMART MATCH TAB ===
-
     def build_smart_tab(self):
         self.smart_frame = ctk.CTkFrame(self.tab_smart)
         self.smart_frame.pack(padx=20, pady=20, fill="both", expand=True)
-
+    
         smart_title = ctk.CTkLabel(
             self.smart_frame,
             text="Smart Match",
             font=("Segoe UI", 20, "bold")
         )
         smart_title.pack(pady=(10, 10))
-
+    
         smart_description = ctk.CTkLabel(
             self.smart_frame,
-            text="Smart Match uses OpenSubtitles and TMDB API keys. Manual Match works without API keys.",
+            text="Smart Match automatically detects movies and TV series from filenames.",
             wraplength=700
         )
         smart_description.pack(pady=(0, 15))
-
-        # Mode selection
+    
+        # Mode selection (Movie / TV Series)
         mode_frame = ctk.CTkFrame(self.smart_frame)
         mode_frame.pack(pady=5, padx=20, fill="x")
-
+    
         mode_label = ctk.CTkLabel(
             mode_frame,
             text="Mode:",
             font=("Segoe UI", 12)
         )
         mode_label.pack(side="left", padx=5)
-
-        self.smart_mode_var = ctk.StringVar(value="TV Series")
+    
+        self.smart_mode_var = ctk.StringVar(value="Movie")
         self.smart_mode_menu = ctk.CTkOptionMenu(
             mode_frame,
-            values=["TV Series", "Movie"],
+            values=["Movie", "TV Series"],
             variable=self.smart_mode_var
         )
         self.smart_mode_menu.pack(side="left", padx=5)
-
+    
         # Language selection
         language_frame = ctk.CTkFrame(self.smart_frame)
         language_frame.pack(pady=5, padx=20, fill="x")
-
+    
         language_label = ctk.CTkLabel(
             language_frame,
             text="Language:",
             font=("Segoe UI", 12)
         )
         language_label.pack(side="left", padx=5)
-
+    
         self.language_var = ctk.StringVar(value="English (en)")
         self.language_menu = ctk.CTkOptionMenu(
             language_frame,
@@ -219,54 +331,80 @@ class SubtitleMatcherUI(ctk.CTk):
             variable=self.language_var
         )
         self.language_menu.pack(side="left", padx=5)
-
+    
         self.smart_video_button = ctk.CTkButton(
             self.smart_frame,
             text="Select Video Library",
             command=self.select_smart_video_folder
         )
         self.smart_video_button.pack(pady=(20, 5))
-
+    
         self.smart_video_label = ctk.CTkLabel(
             self.smart_frame,
             text="No video library selected",
             wraplength=700
         )
         self.smart_video_label.pack(pady=5)
-
-        self.progress_bar = ctk.CTkProgressBar(self.smart_frame)
-        self.progress_bar.pack(pady=15, padx=20, fill="x")
+    
+        # Progress bar with percentage label
+        progress_frame = ctk.CTkFrame(self.smart_frame)
+        progress_frame.pack(pady=15, padx=20, fill="x")
+        
+        self.progress_bar = ctk.CTkProgressBar(progress_frame)
+        self.progress_bar.pack(side="left", fill="x", expand=True, padx=(0, 10))
         self.progress_bar.set(0)
-
+        
+        self.progress_label = ctk.CTkLabel(
+            progress_frame,
+            text="0%",
+            font=("Segoe UI", 12, "bold"),
+            width=40
+        )
+        self.progress_label.pack(side="right")
+    
+        # Status label for current operation
+        self.progress_status_label = ctk.CTkLabel(
+            self.smart_frame,
+            text="Ready",
+            font=("Segoe UI", 11),
+            wraplength=700
+        )
+        self.progress_status_label.pack(pady=(0, 5))
+    
+        # Buttons row
+        button_frame = ctk.CTkFrame(self.smart_frame)
+        button_frame.pack(pady=5)
+        
         self.smart_scan_button = ctk.CTkButton(
-            self.smart_frame,
-            text="Scan Video Library",
-            command=self.smart_scan
+            button_frame,
+            text="Scan Library",
+            command=self.smart_scan,
+            width=150
         )
-        self.smart_scan_button.pack(pady=5)
-
+        self.smart_scan_button.pack(side="left", padx=5)
+    
         self.smart_download_button = ctk.CTkButton(
-            self.smart_frame,
+            button_frame,
             text="Download Subtitles",
-            command=self.smart_download
+            command=self.smart_download,
+            width=150
         )
-        self.smart_download_button.pack(pady=5)
-
+        self.smart_download_button.pack(side="left", padx=5)
+    
         self.smart_match_button = ctk.CTkButton(
-            self.smart_frame,
+            button_frame,
             text="Auto Match & Copy",
-            command=self.smart_match_and_copy
+            command=self.smart_match_and_copy,
+            width=150
         )
-        self.smart_match_button.pack(pady=5)
-
+        self.smart_match_button.pack(side="left", padx=5)
+    
         self.smart_info_label = ctk.CTkLabel(
             self.smart_frame,
             text="Ready",
             wraplength=700
         )
         self.smart_info_label.pack(pady=10)
-
-    # === SETTINGS TAB ===
 
     def build_settings_tab(self):
         self.settings_frame = ctk.CTkFrame(self.tab_settings)
@@ -286,29 +424,51 @@ class SubtitleMatcherUI(ctk.CTk):
         )
         settings_description.pack(pady=(0, 20))
 
-        # OpenSubtitles API Key
+        # === SubDL API Key (Recommended - PRIMARY) ===
         ctk.CTkLabel(
             self.settings_frame,
-            text="OpenSubtitles API Key"
+            text="SubDL API Key (Recommended - PRIMARY)",
+            font=("Segoe UI", 12, "bold")
+        ).pack(pady=(10, 5))
+
+        self.subdl_entry = ctk.CTkEntry(
+            self.settings_frame,
+            width=600,
+            show="*"
+        )
+        self.subdl_entry.pack(pady=5)
+
+        subdl_help = ctk.CTkLabel(
+            self.settings_frame,
+            text="Get your API key at: https://subdl.com",
+            font=("Segoe UI", 10),
+            text_color="gray"
+        )
+        subdl_help.pack(pady=(0, 10))
+
+        # === OpenSubtitles API Key (Fallback) ===
+        ctk.CTkLabel(
+            self.settings_frame,
+            text="OpenSubtitles API Key (Fallback)"
         ).pack(pady=(10, 5))
 
         self.opensub_entry = ctk.CTkEntry(
             self.settings_frame,
             width=600,
-            show="*"  # Default hidden
+            show="*"
         )
         self.opensub_entry.pack(pady=5)
 
-        # TMDB API Key
+        # === TMDB API Key ===
         ctk.CTkLabel(
             self.settings_frame,
-            text="TMDB API Key"
+            text="TMDB API Key (for IMDb ID lookup & posters)"
         ).pack(pady=(20, 5))
 
         self.tmdb_entry = ctk.CTkEntry(
             self.settings_frame,
             width=600,
-            show="*"  # Default hidden
+            show="*"
         )
         self.tmdb_entry.pack(pady=5)
 
@@ -345,17 +505,16 @@ class SubtitleMatcherUI(ctk.CTk):
         self.settings_status_label.pack(pady=10)
 
     def toggle_key_visibility(self):
-        """Toggle visibility of API keys."""
         if self.show_keys_var.get():
+            self.subdl_entry.configure(show="")
             self.opensub_entry.configure(show="")
             self.tmdb_entry.configure(show="")
         else:
+            self.subdl_entry.configure(show="*")
             self.opensub_entry.configure(show="*")
             self.tmdb_entry.configure(show="*")
 
     def load_settings(self):
-        """Load settings from .env file."""
-        # Try user .env first
         env_to_load = None
         
         if self.user_env_path.exists():
@@ -371,16 +530,8 @@ class SubtitleMatcherUI(ctk.CTk):
             with open(env_to_load, "r", encoding="utf-8") as file:
                 for line in file:
                     line = line.strip()
-
-                    if not line:
+                    if not line or line.startswith("#") or "=" not in line:
                         continue
-
-                    if line.startswith("#"):
-                        continue
-
-                    if "=" not in line:
-                        continue
-
                     key, value = line.split("=", 1)
                     values[key.strip()] = value.strip()
         except Exception as e:
@@ -389,55 +540,50 @@ class SubtitleMatcherUI(ctk.CTk):
             )
             return
 
-        opensub_key = values.get("OPENSUBTITLES_API_KEY", "")
-        tmdb_key = values.get("TMDB_API_KEY", "")
-
-        if opensub_key:
+        if values.get("SUBDL_API_KEY"):
+            self.subdl_entry.delete(0, "end")
+            self.subdl_entry.insert(0, values["SUBDL_API_KEY"])
+        
+        if values.get("OPENSUBTITLES_API_KEY"):
             self.opensub_entry.delete(0, "end")
-            self.opensub_entry.insert(0, opensub_key)
-
-        if tmdb_key:
+            self.opensub_entry.insert(0, values["OPENSUBTITLES_API_KEY"])
+        
+        if values.get("TMDB_API_KEY"):
             self.tmdb_entry.delete(0, "end")
-            self.tmdb_entry.insert(0, tmdb_key)
+            self.tmdb_entry.insert(0, values["TMDB_API_KEY"])
 
     def save_settings(self):
-        """Save API keys to .env file and update Config."""
+        subdl_key = self.subdl_entry.get().strip()
         opensub_key = self.opensub_entry.get().strip()
         tmdb_key = self.tmdb_entry.get().strip()
 
         try:
-            # Save to user .env file
             self.user_env_path.parent.mkdir(parents=True, exist_ok=True)
             
             with open(self.user_env_path, "w", encoding="utf-8") as file:
+                file.write(f"SUBDL_API_KEY={subdl_key}\n")
                 file.write(f"OPENSUBTITLES_API_KEY={opensub_key}\n")
                 file.write(f"TMDB_API_KEY={tmdb_key}\n")
             
-            # Also save to project .env (for development)
             with open(self.env_path, "w", encoding="utf-8") as file:
+                file.write(f"SUBDL_API_KEY={subdl_key}\n")
                 file.write(f"OPENSUBTITLES_API_KEY={opensub_key}\n")
                 file.write(f"TMDB_API_KEY={tmdb_key}\n")
             
-            # Update Config class
             Config.load()
             Config.print_status()
-            
-            # Update SmartMatcher with new keys
             self.smart_matcher = SmartMatcher()
             
             self.settings_status_label.configure(
                 text="Settings saved successfully."
             )
             self.log_message(f"✅ Settings saved to: {self.user_env_path}")
-            self.log_message("✅ SmartMatcher updated with new API keys!")
 
         except Exception as e:
             self.settings_status_label.configure(
                 text="Error saving settings: " + str(e)
             )
             messagebox.showerror("Settings Error", str(e))
-
-    # === HELP TAB ===
 
     def build_help_tab(self):
         self.help_frame = ctk.CTkFrame(self.tab_help)
@@ -469,14 +615,18 @@ Smart Match can search and download subtitles automatically.
 
 Steps:
 1. Open the Settings tab.
-2. Enter your OpenSubtitles API key.
-3. Enter your TMDB API key.
-4. Save settings.
-5. Open the Smart Match tab.
-6. Select the video library.
-7. Select language.
-8. Select mode (TV Series or Movie).
-9. Scan, download and match subtitles.
+2. Enter your API keys:
+   - SubDL API Key (Recommended - get at subdl.com)
+   - OpenSubtitles API Key (fallback)
+   - TMDB API Key (for IMDb ID lookup & posters)
+3. Save settings.
+4. Open the Smart Match tab.
+5. Select the video library.
+6. Select language.
+7. Select mode (TV Series or Movie).
+8. Click Scan Library to find videos.
+9. Click Download Subtitles to fetch subtitles.
+10. Click Auto Match & Copy to rename and copy.
 
 TV Series filename examples:
   Show.Name.S01E01.mkv
@@ -492,11 +642,16 @@ Movie filename examples:
 
 API Keys
 
-OpenSubtitles:
+SubDL (Recommended - PRIMARY):
+  Create an account at subdl.com and generate an API key.
+  Most reliable service with excellent availability.
+
+OpenSubtitles (Fallback):
   Create an account at opensubtitles.com and create an API key.
 
 TMDB:
   Create an account at themoviedb.org and create an API key.
+  Used to automatically fetch IMDb IDs, movie posters and ratings.
 
 The keys are saved locally into a .env file next to the application or project folder.
 
@@ -512,11 +667,9 @@ If automatic detection fails, use Manual Match.
         self.help_textbox.insert("1.0", help_text)
         self.help_textbox.configure(state="disabled")
 
-    # === LOG WINDOW ===
-
     def build_log_window(self):
-        self.log_frame = ctk.CTkFrame(self)
-        self.log_frame.pack(pady=(0, 20), padx=20, fill="both", expand=False)
+        self.log_frame = ctk.CTkFrame(self.content_panel)
+        self.log_frame.pack(pady=(0, 10), padx=10, fill="both", expand=False)
 
         log_title = ctk.CTkLabel(
             self.log_frame,
@@ -527,24 +680,20 @@ If automatic detection fails, use Manual Match.
 
         self.result_box = ctk.CTkTextbox(
             self.log_frame,
-            width=800,
-            height=180
+            height=150
         )
-        self.result_box.pack(pady=10, padx=10, fill="both", expand=True)
+        self.result_box.pack(pady=5, padx=10, fill="both", expand=True)
 
     # === API VALIDATION ===
 
     def validate_api_keys_for_smart_match(self):
-        """Validate API keys and update Config."""
-        # Load Config first
         Config.load()
         
+        subdl_key = Config.SUBDL_API_KEY
         opensub_key = Config.OPENSUBTITLES_API_KEY
         tmdb_key = Config.TMDB_API_KEY
         
-        # If Config doesn't have keys, try reading .env directly
-        if not opensub_key or not tmdb_key:
-            # Try reading .env file
+        if not subdl_key or not opensub_key or not tmdb_key:
             env_to_load = None
             if self.user_env_path.exists():
                 env_to_load = self.user_env_path
@@ -557,7 +706,9 @@ If automatic detection fails, use Manual Match.
                         for line in file:
                             if "=" in line:
                                 key, value = line.strip().split("=", 1)
-                                if key == "OPENSUBTITLES_API_KEY":
+                                if key == "SUBDL_API_KEY":
+                                    subdl_key = value
+                                elif key == "OPENSUBTITLES_API_KEY":
                                     opensub_key = value
                                 elif key == "TMDB_API_KEY":
                                     tmdb_key = value
@@ -566,9 +717,10 @@ If automatic detection fails, use Manual Match.
         
         missing_keys = []
 
+        if not subdl_key:
+            missing_keys.append("SUBDL_API_KEY (Recommended - PRIMARY)")
         if not opensub_key:
-            missing_keys.append("OPENSUBTITLES_API_KEY")
-
+            missing_keys.append("OPENSUBTITLES_API_KEY (Fallback)")
         if not tmdb_key:
             missing_keys.append("TMDB_API_KEY")
 
@@ -577,19 +729,18 @@ If automatic detection fails, use Manual Match.
             self.tabview.set("Settings")
             return False
 
-        # Update SmartMatcher
-        self.smart_matcher = SmartMatcher()
+        Config.SUBDL_API_KEY = subdl_key
+        Config.OPENSUBTITLES_API_KEY = opensub_key
+        Config.TMDB_API_KEY = tmdb_key
         
+        self.smart_matcher = SmartMatcher()
         return True
 
     def show_api_warning(self, missing_keys):
         warning = "Missing API keys:\n"
-
         for key in missing_keys:
             warning += "  - " + key + "\n"
-
         warning += "\nPlease add the keys in the Settings tab."
-
         messagebox.showwarning("API Keys Required", warning)
 
     # === MANUAL MATCH METHODS ===
@@ -681,9 +832,7 @@ If automatic detection fails, use Manual Match.
             self.log_message("Selected video library: " + folder)
 
     def _get_language_code(self):
-        """Extract language code from display string."""
         display = self.language_var.get()
-        # Extract code from "English (en)" format
         start = display.find("(") + 1
         end = display.find(")")
         return display[start:end] if start > 0 and end > start else "en"
@@ -706,72 +855,271 @@ If automatic detection fails, use Manual Match.
         thread.daemon = True
         thread.start()
 
+    # ui.py - Korvaa _run_smart_scan metodi
+
+    # ui.py - Koko korjattu osuus
+
     def _run_smart_scan(self):
         try:
+            # Reset progress
+            self.after(0, lambda: self.progress_bar.set(0))
+            self.after(0, lambda: self.progress_label.configure(text="0%"))
+            self.after(0, lambda: self.progress_status_label.configure(text="Scanning..."))
+            
             mode = self.smart_mode_var.get()
-
+    
             if mode == "Movie":
-                # Movie mode - use movie scanning
                 movies = self.smart_matcher.scan_movie_library(self.smart_video_folder)
-
-                self.after(
-                    0,
-                    lambda: self.log_message("Found " + str(len(movies)) + " movie files")
-                )
-
+    
+                self.after(0, lambda: self.log_message("Found " + str(len(movies)) + " movie files"))
+    
                 if movies:
+                    if movies:
+                        self.after(0, lambda: self.update_movie_info(movies[0]))
+                    
                     for movie in movies[:10]:
                         year_str = f" ({movie.year})" if movie.year else ""
-                        self.after(
-                            0,
-                            lambda m=movie: self.log_message(f"  {m.title}{year_str}")
-                        )
-
-                    self.after(
-                        0,
-                        lambda: self.smart_info_label.configure(
-                            text="Scan complete: " + str(len(movies)) + " movies found"
-                        )
-                    )
+                        self.after(0, lambda m=movie: self.log_message(f"  {m.title}{year_str}"))
+    
+                    self.after(0, lambda: self.smart_info_label.configure(
+                        text="Scan complete: " + str(len(movies)) + " movies found"
+                    ))
                 else:
-                    self.after(
-                        0,
-                        lambda: self.smart_info_label.configure(text="No movies found")
-                    )
+                    self.after(0, lambda: self.smart_info_label.configure(text="No movies found"))
             else:
                 # TV Series mode
                 episodes = self.smart_matcher.scan_video_library(self.smart_video_folder)
-
-                self.after(
-                    0,
-                    lambda: self.log_message("Found " + str(len(episodes)) + " video files")
-                )
-
+    
+                self.after(0, lambda: self.log_message("Found " + str(len(episodes)) + " video files"))
+    
                 if episodes:
                     show_name = episodes[0].show_name
                     season = episodes[0].season
                     season_count = len([e for e in episodes if e.season == season])
-
+    
                     self.after(0, lambda: self.log_message("Show: " + show_name))
                     self.after(0, lambda: self.log_message("Season: " + str(season)))
                     self.after(0, lambda: self.log_message("Episodes: " + str(season_count)))
-                    self.after(
-                        0,
-                        lambda: self.smart_info_label.configure(
-                            text="Scan complete: " + str(len(episodes)) + " episodes found"
-                        )
-                    )
+                    
+                    # Update info panel for TV show
+                    self.after(0, lambda: self.update_show_info(show_name))
+                    
+                    self.after(0, lambda: self.smart_info_label.configure(
+                        text="Scan complete: " + str(len(episodes)) + " episodes found"
+                    ))
                 else:
-                    self.after(
-                        0,
-                        lambda: self.smart_info_label.configure(text="No episodes found")
-                    )
-
-            self.after(0, lambda: self.progress_bar.set(0.5))
-
+                    self.after(0, lambda: self.smart_info_label.configure(text="No episodes found"))
+    
+            self.after(0, lambda: self.progress_bar.set(1.0))
+            self.after(0, lambda: self.progress_label.configure(text="100%"))
+            self.after(0, lambda: self.progress_status_label.configure(text="Scan complete!"))
+    
         except Exception as e:
             self.after(0, lambda: self.log_message("Error: " + str(e)))
             self.after(0, lambda: self.smart_info_label.configure(text="Error scanning"))
+            self.after(0, lambda: self.progress_status_label.configure(text="Error!"))
+    
+    def update_show_info(self, show_name: str):
+        """Update info panel with TV show details."""
+        try:
+            # Find show ID
+            show_id = self.smart_matcher.find_show_id(show_name)
+            if not show_id:
+                self.movie_title_label.configure(text=show_name)
+                self.movie_year_label.configure(text="")
+                self.rating_label.configure(text="⭐ N/A")
+                self.vote_count_label.configure(text="")
+                self.genres_label.configure(text="")
+                self.runtime_label.configure(text="TV Series")
+                self.overview_text.configure(state="normal")
+                self.overview_text.delete("1.0", "end")
+                self.overview_text.insert("1.0", "No overview available.")
+                self.overview_text.configure(state="disabled")
+                self.poster_label.configure(text="🎬\nNo poster", image="")
+                return
+            
+            # Get show details
+            details = self.smart_matcher.get_show_details(show_id)
+            if not details:
+                return
+            
+            # Update labels
+            self.movie_title_label.configure(text=details.get("title", show_name))
+            year = details.get("year", "")
+            self.movie_year_label.configure(text=str(year) if year else "")
+            
+            # Rating
+            rating = details.get("rating", 0)
+            votes = details.get("vote_count", 0)
+            self.rating_label.configure(text=f"⭐ {rating:.1f}" if rating > 0 else "⭐ N/A")
+            self.vote_count_label.configure(text=f"({votes:,} votes)" if votes > 0 else "")
+            
+            # Genres
+            genres = details.get("genres", [])
+            self.genres_label.configure(text=", ".join(genres[:3]) if genres else "")
+            
+            # Runtime
+            self.runtime_label.configure(text="TV Series")
+            
+            # Overview
+            overview = details.get("overview", "")
+            self.overview_text.configure(state="normal")
+            self.overview_text.delete("1.0", "end")
+            self.overview_text.insert("1.0", overview if overview else "No overview available.")
+            self.overview_text.configure(state="disabled")
+            
+            # Poster
+            poster_path = details.get("poster_path")
+            if poster_path:
+                self.load_poster(poster_path)
+            else:
+                self.poster_label.configure(text="🎬\nNo poster", image="")
+            
+            self.status_label.configure(text=f"Loaded: {details.get('title', show_name)}")
+            
+        except Exception as e:
+            self.log_message(f"Error updating show info: {e}")
+
+    def update_movie_info(self, movie):
+        """Update info panel with movie details."""
+        try:
+            # Get TMDB ID
+            tmdb_id = self.smart_matcher.find_movie_id(movie.title, movie.year)
+            if not tmdb_id:
+                return
+            
+            # Get movie details from TMDB
+            details = self.smart_matcher.get_movie_details(tmdb_id)
+            if not details:
+                return
+            
+            # Update labels
+            self.movie_title_label.configure(text=details.get("title", movie.title))
+            self.movie_year_label.configure(text=str(details.get("year", "")))
+            
+            # Rating
+            rating = details.get("rating", 0)
+            votes = details.get("vote_count", 0)
+            self.rating_label.configure(text=f"⭐ {rating:.1f}" if rating > 0 else "⭐ N/A")
+            self.vote_count_label.configure(text=f"({votes:,} votes)" if votes > 0 else "")
+            
+            # Genres
+            genres = details.get("genres", [])
+            self.genres_label.configure(text=", ".join(genres[:3]) if genres else "")
+            
+            # Runtime
+            runtime = details.get("runtime", 0)
+            if runtime > 0:
+                hours = runtime // 60
+                minutes = runtime % 60
+                self.runtime_label.configure(text=f"{hours}h {minutes}min" if hours > 0 else f"{minutes}min")
+            else:
+                self.runtime_label.configure(text="")
+            
+            # Overview
+            overview = details.get("overview", "")
+            self.overview_text.configure(state="normal")
+            self.overview_text.delete("1.0", "end")
+            self.overview_text.insert("1.0", overview if overview else "No overview available.")
+            self.overview_text.configure(state="disabled")
+            
+            # Poster
+            poster_path = details.get("poster_path")
+            if poster_path:
+                self.load_poster(poster_path)
+            
+            self.status_label.configure(text=f"Loaded: {details.get('title', movie.title)}")
+            
+        except Exception as e:
+            self.log_message(f"Error updating movie info: {e}")
+
+
+# ui.py - Lisää tämä metodi update_movie_info jälkeen
+
+    def update_show_info(self, show_name: str):
+        """Update info panel with TV show details."""
+        try:
+            # Find show ID
+            show_id = self.smart_matcher.find_show_id(show_name)
+            if not show_id:
+                self.movie_title_label.configure(text=show_name)
+                self.movie_year_label.configure(text="")
+                self.rating_label.configure(text="⭐ N/A")
+                self.vote_count_label.configure(text="")
+                self.genres_label.configure(text="")
+                self.runtime_label.configure(text="TV Series")
+                self.overview_text.configure(state="normal")
+                self.overview_text.delete("1.0", "end")
+                self.overview_text.insert("1.0", "No overview available.")
+                self.overview_text.configure(state="disabled")
+                self.poster_label.configure(text="🎬\nNo poster", image="")
+                return
+
+            # Get show details
+            details = self.smart_matcher.get_show_details(show_id)
+            if not details:
+                return
+
+            # Update labels
+            self.movie_title_label.configure(text=details.get("title", show_name))
+            year = details.get("year", "")
+            self.movie_year_label.configure(text=str(year) if year else "")
+
+            # Rating
+            rating = details.get("rating", 0)
+            votes = details.get("vote_count", 0)
+            self.rating_label.configure(text=f"⭐ {rating:.1f}" if rating > 0 else "⭐ N/A")
+            self.vote_count_label.configure(text=f"({votes:,} votes)" if votes > 0 else "")
+
+            # Genres
+            genres = details.get("genres", [])
+            self.genres_label.configure(text=", ".join(genres[:3]) if genres else "")
+
+            # Runtime
+            self.runtime_label.configure(text="TV Series")
+
+            # Overview
+            overview = details.get("overview", "")
+            self.overview_text.configure(state="normal")
+            self.overview_text.delete("1.0", "end")
+            self.overview_text.insert("1.0", overview if overview else "No overview available.")
+            self.overview_text.configure(state="disabled")
+
+            # Poster
+            poster_path = details.get("poster_path")
+            if poster_path:
+                self.load_poster(poster_path)
+            else:
+                self.poster_label.configure(text="🎬\nNo poster", image="")
+
+            self.status_label.configure(text=f"Loaded: {details.get('title', show_name)}")
+
+        except Exception as e:
+            self.log_message(f"Error updating show info: {e}")
+
+    def load_poster(self, poster_path):
+        """Load and display movie poster using CTkImage."""
+        try:
+            # TMDB poster URL
+            poster_url = f"https://image.tmdb.org/t/p/w500{poster_path}"
+            
+            # Download poster
+            response = requests.get(poster_url, timeout=10)
+            if response.status_code == 200:
+                image_data = response.content
+                image = Image.open(BytesIO(image_data))
+                
+                # Resize to fit poster frame
+                image = image.resize((250, 375), Image.Resampling.LANCZOS)
+                
+                # Convert to CTkImage (not PhotoImage)
+                ctk_image = ctk.CTkImage(light_image=image, dark_image=image, size=(250, 375))
+                
+                # Update label
+                self.poster_label.configure(image=ctk_image, text="")
+                self.poster_label.image = ctk_image  # Keep reference
+        except Exception as e:
+            print(f"Error loading poster: {e}")
 
     def smart_download(self):
         self.clear_log()
@@ -807,62 +1155,84 @@ If automatic detection fails, use Manual Match.
 
     def _run_tv_download(self, language_code):
         episodes = self.smart_matcher.scan_video_library(self.smart_video_folder)
-
+    
         if not episodes:
             self.after(0, lambda: self.log_message("No episodes found"))
             return
-
+    
         show_name = episodes[0].show_name
         self.after(0, lambda: self.log_message("Searching for: " + show_name))
-
+    
         show_id = self.smart_matcher.find_show_id(show_name)
         if not show_id:
             self.after(0, lambda: self.log_message("Could not find show: " + show_name))
             return
-
+    
         imdb_id = self.smart_matcher.get_imdb_id(show_id)
         if not imdb_id:
             self.after(0, lambda: self.log_message("Could not get IMDB ID"))
             return
-
+    
         self.after(0, lambda: self.log_message("IMDB ID: " + imdb_id))
-
+    
         total = len(episodes)
         downloaded = 0
-
+    
         for i, episode in enumerate(episodes):
             progress = (i + 1) / total
+            percent = int(progress * 100)
+            
+            # Update progress bar and percentage
             self.after(0, lambda p=progress: self.progress_bar.set(p))
+            self.after(0, lambda p=percent: self.progress_label.configure(text=f"{p}%"))
             self.after(
                 0,
-                lambda e=episode: self.log_message("Episode " + str(e.episode) + "...")
+                lambda e=episode, p=percent: self.progress_status_label.configure(
+                    text=f"Processing: S{e.season:02d}E{e.episode:02d} ({p}%)"
+                )
             )
-
+    
             subtitle_file = self.smart_matcher.download_subtitles_for_episode(
                 episode,
                 imdb_id,
                 language_code
             )
-
+    
             if subtitle_file:
                 downloaded += 1
                 self.after(
                     0,
-                    lambda f=subtitle_file: self.log_message("  Downloaded: " + f.name)
+                    lambda f=subtitle_file: self.log_message(f"  ✅ Downloaded: {f.name}")
                 )
-
+            else:
+                self.after(
+                    0,
+                    lambda e=episode: self.log_message(f"  ❌ No subtitle found for S{e.season:02d}E{e.episode:02d}")
+                )
+    
         self.after(0, lambda: self.log_message(""))
         self.after(
             0,
-            lambda: self.log_message("Downloaded: " + str(downloaded) + " of " + str(total))
+            lambda: self.log_message(f"📊 Download Summary:")
         )
         self.after(
             0,
+            lambda: self.log_message(f"  ✅ Successful: {downloaded}/{total} episodes")
+        )
+        if downloaded < total:
+            self.after(
+                0,
+                lambda: self.log_message(f"  ❌ Failed: {total - downloaded} episodes")
+            )
+        self.after(
+            0,
             lambda: self.smart_info_label.configure(
-                text="Download complete: " + str(downloaded) + " subtitles"
+                text=f"Download complete: {downloaded}/{total} subtitles"
             )
         )
         self.after(0, lambda: self.progress_bar.set(1.0))
+        self.after(0, lambda: self.progress_label.configure(text="100%"))
+        self.after(0, lambda: self.progress_status_label.configure(text="Complete!"))
 
     def _run_movie_download(self, language_code):
         movies = self.smart_matcher.scan_movie_library(self.smart_video_folder)
@@ -873,39 +1243,73 @@ If automatic detection fails, use Manual Match.
 
         total = len(movies)
         downloaded = 0
+        failed = []
 
         for i, movie in enumerate(movies):
             progress = (i + 1) / total
+            percent = int(progress * 100)
+
+            # Update progress bar and percentage
             self.after(0, lambda p=progress: self.progress_bar.set(p))
-            self.after(
-                0,
-                lambda m=movie: self.log_message(f"Processing: {m.title}...")
-            )
+            self.after(0, lambda p=percent: self.progress_label.configure(text=f"{p}%"))
+            self.after(0, lambda m=movie, p=percent: self.progress_status_label.configure(
+                text=f"Processing: {movie.title} ({p}%)"
+            ))
 
-            subtitle_file = self.smart_matcher.download_subtitles_for_movie(
-                movie,
-                language_code
-            )
+            # Update info panel with current movie
+            self.after(0, lambda m=movie: self.update_movie_info(m))
 
-            if subtitle_file:
-                downloaded += 1
+            try:
+                subtitle_file = self.smart_matcher.download_subtitles_for_movie(
+                    movie,
+                    language_code
+                )
+
+                if subtitle_file:
+                    downloaded += 1
+                    self.after(
+                        0,
+                        lambda f=subtitle_file: self.log_message(f"  ✅ Downloaded: {f.name}")
+                    )
+                else:
+                    failed.append(movie.title)
+                    self.after(
+                        0,
+                        lambda m=movie: self.log_message(f"  ❌ No subtitle found for: {m.title}")
+                    )
+            except Exception as e:
+                failed.append(movie.title)
                 self.after(
                     0,
-                    lambda f=subtitle_file: self.log_message("  Downloaded: " + f.name)
+                    lambda m=movie, e=e: self.log_message(f"  ❌ Error for {m.title}: {str(e)}")
                 )
 
         self.after(0, lambda: self.log_message(""))
         self.after(
             0,
-            lambda: self.log_message("Downloaded: " + str(downloaded) + " of " + str(total))
+            lambda: self.log_message(f"📊 Download Summary:")
         )
         self.after(
             0,
+            lambda: self.log_message(f"  ✅ Successful: {downloaded}/{total} movies")
+        )
+        if failed:
+            self.after(
+                0,
+                lambda: self.log_message(f"  ❌ Failed ({len(failed)}): {', '.join(failed[:5])}")
+            )
+            if len(failed) > 5:
+                self.after(0, lambda: self.log_message(f"     ... and {len(failed) - 5} more"))
+
+        self.after(
+            0,
             lambda: self.smart_info_label.configure(
-                text="Download complete: " + str(downloaded) + " subtitles"
+                text=f"Download complete: {downloaded}/{total} subtitles"
             )
         )
         self.after(0, lambda: self.progress_bar.set(1.0))
+        self.after(0, lambda: self.progress_label.configure(text="100%"))
+        self.after(0, lambda: self.progress_status_label.configure(text="Complete!"))
 
     def smart_match_and_copy(self):
         self.clear_log()
@@ -950,23 +1354,26 @@ If automatic detection fails, use Manual Match.
             for video, subtitle in results.items():
                 self.after(
                     0,
-                    lambda v=video, s=subtitle: self.log_message(v.name + " -> " + s.name)
+                    lambda v=video, s=subtitle: self.log_message(f"  {v.name} -> {s.name}")
                 )
 
             self.after(0, lambda: self.log_message(""))
             self.after(
                 0,
-                lambda: self.log_message("Completed: " + str(len(results)) + " files matched")
+                lambda: self.log_message(f"✅ Completed: {len(results)} files matched")
             )
             self.after(
                 0,
                 lambda: self.smart_info_label.configure(
-                    text="Match complete: " + str(len(results)) + " files"
+                    text=f"Match complete: {len(results)} files"
                 )
             )
+            self.after(0, lambda: self.progress_bar.set(1.0))
+            self.after(0, lambda: self.progress_label.configure(text="100%"))
+            self.after(0, lambda: self.progress_status_label.configure(text="Match complete!"))
 
         except Exception as e:
-            self.after(0, lambda: self.log_message("Error: " + str(e)))
+            self.after(0, lambda: self.log_message(f"❌ Error matching: {str(e)}"))
             self.after(0, lambda: self.smart_info_label.configure(text="Error matching"))
 
     # === HELPER METHODS ===
@@ -980,7 +1387,7 @@ If automatic detection fails, use Manual Match.
 
 
 def main():
-    ctk.set_appearance_mode("System")
+    ctk.set_appearance_mode("dark")
     ctk.set_default_color_theme("blue")
 
     app = SubtitleMatcherUI()

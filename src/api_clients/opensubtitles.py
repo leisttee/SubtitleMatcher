@@ -84,15 +84,45 @@ class OpenSubtitlesClient:
                 print(f"  Response: {e.response.text[:200]}")
             return None
     
+    # api_clients/opensubtitles.py - Korvaa get_subtitle_file
+
     def get_subtitle_file(self, subtitle_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Get subtitle file information."""
-        
-        files = subtitle_data.get("attributes", {}).get("files", [])
-        if not files:
+        """
+        Get file information from subtitle data.
+        """
+        try:
+            # Subtitle data structure from OpenSubtitles
+            attributes = subtitle_data.get("attributes", {})
+            files = attributes.get("files", [])
+            
+            if files:
+                # Return first file with proper file_id
+                for file_info in files:
+                    file_id = file_info.get("file_id")
+                    if file_id:
+                        print(f"  Found file_id: {file_id}")
+                        return file_info
+                return files[0]
+            
+            # Alternative structure - direct file_id in attributes
+            file_id = attributes.get("file_id")
+            if file_id:
+                print(f"  Found file_id: {file_id}")
+                return {"file_id": file_id}
+            
+            # Check in root
+            file_id = subtitle_data.get("file_id")
+            if file_id:
+                print(f"  Found file_id: {file_id}")
+                return {"file_id": file_id}
+            
+            print("❌ No file_id found in subtitle data")
+            print(f"  Available keys: {list(attributes.keys()) if attributes else list(subtitle_data.keys())}")
             return None
-        
-        # Select first file (usually best quality)
-        return files[0]
+            
+        except Exception as e:
+            print(f"❌ Error getting file info: {e}")
+            return None
     
     def get_subtitle_details(self, subtitle_id: int) -> Optional[Dict[str, Any]]:
         """Get subtitle details by ID."""

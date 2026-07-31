@@ -1,75 +1,149 @@
-# src/config.py
+# config.py
 import os
 from pathlib import Path
 from dotenv import load_dotenv
+from typing import Optional, List
+
 
 class Config:
-    # Etsi .env tiedosto (projektin juuresta)
-    BASE_DIR = Path(__file__).resolve().parent.parent
+    """Configuration manager for API keys and settings."""
     
-    # Käyttäjän .env polku (asennetulle versiolle)
-    USER_ENV_PATH = Path.home() / ".subtitlematcher" / ".env"
-    ENV_PATH = BASE_DIR / ".env"
+    # Class variables for API keys
+    SUBDL_API_KEY: Optional[str] = None
+    OPENSUBTITLES_API_KEY: Optional[str] = None
+    TMDB_API_KEY: Optional[str] = None
     
-    # API-avaimet (oletusarvot)
-    OPENSUBTITLES_API_KEY = ""
-    OPENSUBTITLES_USERNAME = ""
-    OPENSUBTITLES_PASSWORD = ""
-    OPENSUBTITLES_API_URL = "https://api.opensubtitles.com/api/v1"
-    
-    TMDB_API_KEY = ""
-    TMDB_API_URL = "https://api.themoviedb.org/3"
-    
-    # Supported languages
-    SUPPORTED_LANGUAGES = ["en", "fi", "sv", "no", "da", "et", "lv", "lt", "de", "fr", "es", "it", "pl", "cs", "nl", "pt", "ru"]
-    
-    # Download settings
-    DOWNLOAD_DIR = Path.home() / ".subtitlematcher" / "downloads"
+    # Track which .env file was loaded
+    _loaded_env_path: Optional[Path] = None
     
     @classmethod
-    def load(cls):
-        """Lataa .env tiedosto ja päivitä API-avaimet"""
-        env_loaded = False
+    def load(cls, env_path: Optional[Path] = None) -> 'Config':
+        """
+        Load configuration from .env file.
         
-        # Kokeile ensin käyttäjän .env-tiedostoa
-        if cls.USER_ENV_PATH.exists():
-            load_dotenv(cls.USER_ENV_PATH)
-            print(f"✅ Loaded .env from user: {cls.USER_ENV_PATH}")
-            env_loaded = True
+        Args:
+            env_path: Optional path to .env file. If None, searches in default locations.
+            
+        Returns:
+            Config class for chaining
+        """
+        loaded_path = None
         
-        # Jos ei löydy, kokeile projektin .env-tiedostoa
-        if not env_loaded and cls.ENV_PATH.exists():
-            load_dotenv(cls.ENV_PATH)
-            print(f"✅ Loaded .env from project: {cls.ENV_PATH}")
-            env_loaded = True
+        # Try to find .env file
+        if env_path and env_path.exists():
+            load_dotenv(env_path)
+            loaded_path = env_path
+        else:
+            # Try default locations in order of preference
+            possible_paths = [
+                Path.home() / ".subtitlematcher" / ".env",  # User config (highest priority)
+                Path.cwd() / ".env",                         # Project root
+                Path(__file__).resolve().parent.parent / ".env",  # Project root (src/..)
+                Path(__file__).resolve().parent / ".env",    # Current directory
+            ]
+            
+            for path in possible_paths:
+                if path.exists():
+                    load_dotenv(path)
+                    loaded_path = path
+                    break
         
-        if not env_loaded:
-            print(f"⚠️ .env file not found")
-        
-        # Päivitä API-avaimet
+        # Load API keys from environment
+        cls.SUBDL_API_KEY = os.getenv("SUBDL_API_KEY", "")
         cls.OPENSUBTITLES_API_KEY = os.getenv("OPENSUBTITLES_API_KEY", "")
-        cls.OPENSUBTITLES_USERNAME = os.getenv("OPENSUBTITLES_USERNAME", "")
-        cls.OPENSUBTITLES_PASSWORD = os.getenv("OPENSUBTITLES_PASSWORD", "")
         cls.TMDB_API_KEY = os.getenv("TMDB_API_KEY", "")
+        
+        cls._loaded_env_path = loaded_path
+        
+        return cls
     
     @classmethod
-    def validate(cls):
-        """Tarkistaa että tarvittavat API-avaimet on asetettu"""
-        missing = []
-        if not cls.OPENSUBTITLES_API_KEY:
-            missing.append("OPENSUBTITLES_API_KEY")
-        if not cls.TMDB_API_KEY:
-            missing.append("TMDB_API_KEY")
-        return missing
-    
-    @classmethod
-    def print_status(cls):
-        """Tulosta API-avainten tila"""
+    def print_status(cls) -> None:
+        """Print API key status."""
         print("\n🔑 API Keys Status:")
-        print(f"  OPENSUBTITLES_API_KEY: {'✅ Set' if cls.OPENSUBTITLES_API_KEY else '❌ Missing'}")
-        print(f"  TMDB_API_KEY: {'✅ Set' if cls.TMDB_API_KEY else '❌ Missing'}")
-        print(f"  .env path (user): {cls.USER_ENV_PATH}")
-        print(f"  .env exists (user): {cls.USER_ENV_PATH.exists()}")
+        print(f"  SUBDL_API_KEY: {'✅ Set' if cls.SUBDL_API_KEY else '❌ Not set'}")
+        print(f"  OPENSUBTITLES_API_KEY: {'✅ Set' if cls.OPENSUBTITLES_API_KEY else '❌ Not set'}")
+        print(f"  TMDB_API_KEY: {'✅ Set' if cls.TMDB_API_KEY else '❌ Not set'}")
+        
+        # Show which .env file was loaded
+        if cls._loaded_env_path:
+            print(f"  📄 Loaded from: {cls._loaded_env_path}")
+        else:
+            print(f"  📄 No .env file found")
+        
+        # Show default .env location
+        env_file = Path.home() / ".subtitlematcher" / ".env"
+        if env_file.exists():
+            print(f"  💾 Default save location: {env_file}")
+            print(f"  💾 File exists: True")
+        else:
+            print(f"  💾 Default save location: {env_file}")
+            print(f"  💾 File exists: False")
+    
+    @classmethod
+    def save(cls, env_path: Optional[Path] = None) -> None:
+        """
+        Save current configuration to .env file.
+        
+        Args:
+            env_path: Optional path to save .env file. Defaults to user config.
+        """
+        if env_path is None:
+            env_path = Path.home() / ".subtitlematcher" / ".env"
+        
+        # Ensure directory exists
+        env_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Write configuration
+        with open(env_path, "w", encoding="utf-8") as f:
+            f.write(f"SUBDL_API_KEY={cls.SUBDL_API_KEY or ''}\n")
+            f.write(f"OPENSUBTITLES_API_KEY={cls.OPENSUBTITLES_API_KEY or ''}\n")
+            f.write(f"TMDB_API_KEY={cls.TMDB_API_KEY or ''}\n")
+        
+        cls._loaded_env_path = env_path
+        print(f"✅ Configuration saved to: {env_path}")
+    
+    @classmethod
+    def is_valid(cls) -> bool:
+        """Check if at least one subtitle provider is configured."""
+        return bool(cls.SUBDL_API_KEY or cls.OPENSUBTITLES_API_KEY)
+    
+    @classmethod
+    def has_tmdb(cls) -> bool:
+        """Check if TMDB API key is set."""
+        return bool(cls.TMDB_API_KEY)
+    
+    @classmethod
+    def get_available_providers(cls) -> List[str]:
+        """Get list of available subtitle providers."""
+        providers = []
+        if cls.SUBDL_API_KEY:
+            providers.append("subdl")
+        if cls.OPENSUBTITLES_API_KEY:
+            providers.append("opensubtitles")
+        return providers
+    
+    @classmethod
+    def get_primary_provider(cls) -> Optional[str]:
+        """Get the primary subtitle provider (prefer SubDL)."""
+        if cls.SUBDL_API_KEY:
+            return "subdl"
+        elif cls.OPENSUBTITLES_API_KEY:
+            return "opensubtitles"
+        return None
+    
+    @classmethod
+    def to_dict(cls) -> dict:
+        """Export configuration as dictionary."""
+        return {
+            "subdl_api_key": cls.SUBDL_API_KEY,
+            "opensubtitles_api_key": cls.OPENSUBTITLES_API_KEY,
+            "tmdb_api_key": cls.TMDB_API_KEY,
+            "loaded_from": str(cls._loaded_env_path) if cls._loaded_env_path else None,
+            "providers": cls.get_available_providers(),
+            "is_valid": cls.is_valid()
+        }
 
-# Lataa config importin yhteydessä
+
+# Auto-load configuration when module is imported
 Config.load()
