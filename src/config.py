@@ -6,6 +6,9 @@ from dotenv import load_dotenv
 class Config:
     # Etsi .env tiedosto (projektin juuresta)
     BASE_DIR = Path(__file__).resolve().parent.parent
+    
+    # Käyttäjän .env polku (asennetulle versiolle)
+    USER_ENV_PATH = Path.home() / ".subtitlematcher" / ".env"
     ENV_PATH = BASE_DIR / ".env"
     
     # API-avaimet (oletusarvot)
@@ -26,11 +29,22 @@ class Config:
     @classmethod
     def load(cls):
         """Lataa .env tiedosto ja päivitä API-avaimet"""
-        if cls.ENV_PATH.exists():
+        env_loaded = False
+        
+        # Kokeile ensin käyttäjän .env-tiedostoa
+        if cls.USER_ENV_PATH.exists():
+            load_dotenv(cls.USER_ENV_PATH)
+            print(f"✅ Loaded .env from user: {cls.USER_ENV_PATH}")
+            env_loaded = True
+        
+        # Jos ei löydy, kokeile projektin .env-tiedostoa
+        if not env_loaded and cls.ENV_PATH.exists():
             load_dotenv(cls.ENV_PATH)
-            print(f"✅ Loaded .env from: {cls.ENV_PATH}")
-        else:
-            print(f"⚠️ .env file not found at: {cls.ENV_PATH}")
+            print(f"✅ Loaded .env from project: {cls.ENV_PATH}")
+            env_loaded = True
+        
+        if not env_loaded:
+            print(f"⚠️ .env file not found")
         
         # Päivitä API-avaimet
         cls.OPENSUBTITLES_API_KEY = os.getenv("OPENSUBTITLES_API_KEY", "")
@@ -54,8 +68,8 @@ class Config:
         print("\n🔑 API Keys Status:")
         print(f"  OPENSUBTITLES_API_KEY: {'✅ Set' if cls.OPENSUBTITLES_API_KEY else '❌ Missing'}")
         print(f"  TMDB_API_KEY: {'✅ Set' if cls.TMDB_API_KEY else '❌ Missing'}")
-        print(f"  .env path: {cls.ENV_PATH}")
-        print(f"  .env exists: {cls.ENV_PATH.exists()}")
+        print(f"  .env path (user): {cls.USER_ENV_PATH}")
+        print(f"  .env exists (user): {cls.USER_ENV_PATH.exists()}")
 
 # Lataa config importin yhteydessä
 Config.load()

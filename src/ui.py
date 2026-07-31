@@ -31,6 +31,9 @@ class SubtitleMatcherUI(ctk.CTk):
 
         self.base_dir = self.get_base_dir()
         self.env_path = self.base_dir / ".env"
+        
+        # User .env path (for installed version)
+        self.user_env_path = Path.home() / ".subtitlematcher" / ".env"
 
         self.setup_window_icon()
         self.build_ui()
@@ -322,7 +325,7 @@ class SubtitleMatcherUI(ctk.CTk):
         # Settings file location
         self.env_location_label = ctk.CTkLabel(
             self.settings_frame,
-            text="Settings file: " + str(self.env_path),
+            text="Settings file: " + str(self.user_env_path),
             wraplength=700
         )
         self.env_location_label.pack(pady=(20, 5))
@@ -351,13 +354,21 @@ class SubtitleMatcherUI(ctk.CTk):
             self.tmdb_entry.configure(show="*")
 
     def load_settings(self):
-        if not self.env_path.exists():
+        """Load settings from .env file."""
+        # Try user .env first
+        env_to_load = None
+        
+        if self.user_env_path.exists():
+            env_to_load = self.user_env_path
+        elif self.env_path.exists():
+            env_to_load = self.env_path
+        else:
             return
 
         values = {}
 
         try:
-            with open(self.env_path, "r", encoding="utf-8") as file:
+            with open(env_to_load, "r", encoding="utf-8") as file:
                 for line in file:
                     line = line.strip()
 
@@ -390,28 +401,35 @@ class SubtitleMatcherUI(ctk.CTk):
             self.tmdb_entry.insert(0, tmdb_key)
 
     def save_settings(self):
-        """Tallenna API-avaimet .env-tiedostoon ja päivitä Config"""
+        """Save API keys to .env file and update Config."""
         opensub_key = self.opensub_entry.get().strip()
         tmdb_key = self.tmdb_entry.get().strip()
 
         try:
-            # Tallenna .env tiedosto
+            # Save to user .env file
+            self.user_env_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            with open(self.user_env_path, "w", encoding="utf-8") as file:
+                file.write(f"OPENSUBTITLES_API_KEY={opensub_key}\n")
+                file.write(f"TMDB_API_KEY={tmdb_key}\n")
+            
+            # Also save to project .env (for development)
             with open(self.env_path, "w", encoding="utf-8") as file:
                 file.write(f"OPENSUBTITLES_API_KEY={opensub_key}\n")
                 file.write(f"TMDB_API_KEY={tmdb_key}\n")
             
-            # Päivitä Config-luokka
-            from config import Config
+            # Update Config class
             Config.load()
             Config.print_status()
             
-            # Päivitä SmartMatcher uusilla avaimilla
+            # Update SmartMatcher with new keys
             self.smart_matcher = SmartMatcher()
             
             self.settings_status_label.configure(
                 text="Settings saved successfully."
             )
-            self.log_message("✅ Settings saved and SmartMatcher updated!")
+            self.log_message(f"✅ Settings saved to: {self.user_env_path}")
+            self.log_message("✅ SmartMatcher updated with new API keys!")
 
         except Exception as e:
             self.settings_status_label.configure(
@@ -517,13 +535,34 @@ If automatic detection fails, use Manual Match.
     # === API VALIDATION ===
 
     def validate_api_keys_for_smart_match(self):
-        """Tarkista API-avaimet ja päivitä Config"""
-        # Lataa ensin .env
-        from config import Config
+        """Validate API keys and update Config."""
+        # Load Config first
         Config.load()
         
         opensub_key = Config.OPENSUBTITLES_API_KEY
         tmdb_key = Config.TMDB_API_KEY
+        
+        # If Config doesn't have keys, try reading .env directly
+        if not opensub_key or not tmdb_key:
+            # Try reading .env file
+            env_to_load = None
+            if self.user_env_path.exists():
+                env_to_load = self.user_env_path
+            elif self.env_path.exists():
+                env_to_load = self.env_path
+            
+            if env_to_load:
+                try:
+                    with open(env_to_load, "r", encoding="utf-8") as file:
+                        for line in file:
+                            if "=" in line:
+                                key, value = line.strip().split("=", 1)
+                                if key == "OPENSUBTITLES_API_KEY":
+                                    opensub_key = value
+                                elif key == "TMDB_API_KEY":
+                                    tmdb_key = value
+                except Exception as e:
+                    print(f"Error reading .env: {e}")
         
         missing_keys = []
 
@@ -538,7 +577,7 @@ If automatic detection fails, use Manual Match.
             self.tabview.set("Settings")
             return False
 
-        # Päivitä SmartMatcher
+        # Update SmartMatcher
         self.smart_matcher = SmartMatcher()
         
         return True
