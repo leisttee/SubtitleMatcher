@@ -23,7 +23,12 @@ class OpenSubtitlesClient:
                         season: Optional[int] = None,
                         episode: Optional[int] = None,
                         language: str = "en") -> List[Dict[str, Any]]:
-        """Hakee tekstityksiä eri kriteereillä"""
+        """Search for subtitles using various criteria."""
+        
+        # Check if API key is set
+        if not self.api_key:
+            print("❌ OpenSubtitles API key is missing!")
+            return []
         
         url = f"{self.base_url}/subtitles"
         params = {
@@ -40,43 +45,57 @@ class OpenSubtitlesClient:
             params["episode_number"] = episode
         
         try:
+            print(f"🔍 Searching OpenSubtitles: {params}")
             response = self.session.get(url, params=params)
             response.raise_for_status()
             data = response.json()
             
-            # Palauta tekstitykset listana
-            return data.get("data", [])
+            results = data.get("data", [])
+            print(f"✅ Found {len(results)} subtitles from OpenSubtitles")
+            return results
             
         except requests.exceptions.RequestException as e:
-            print(f"Error searching subtitles: {e}")
+            print(f"❌ Error searching subtitles: {e}")
+            if hasattr(e, 'response') and e.response:
+                print(f"  Status: {e.response.status_code}")
+                print(f"  Response: {e.response.text[:200]}")
             return []
     
     def download_subtitle(self, file_id: int) -> Optional[bytes]:
-        """Lataa tekstitystiedoston"""
+        """Download subtitle file."""
+        
+        if not self.api_key:
+            print("❌ OpenSubtitles API key is missing!")
+            return None
         
         url = f"{self.base_url}/download/{file_id}"
         
         try:
+            print(f"⬇️ Downloading subtitle: {file_id}")
             response = self.session.get(url)
             response.raise_for_status()
+            print(f"✅ Downloaded {len(response.content)} bytes")
             return response.content
             
         except requests.exceptions.RequestException as e:
-            print(f"Error downloading subtitle: {e}")
+            print(f"❌ Error downloading subtitle: {e}")
+            if hasattr(e, 'response') and e.response:
+                print(f"  Status: {e.response.status_code}")
+                print(f"  Response: {e.response.text[:200]}")
             return None
     
     def get_subtitle_file(self, subtitle_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Hakee tekstityksen tiedostotiedot"""
+        """Get subtitle file information."""
         
         files = subtitle_data.get("attributes", {}).get("files", [])
         if not files:
             return None
         
-        # Valitaan ensimmäinen tiedosto (yleensä paras laatu)
+        # Select first file (usually best quality)
         return files[0]
     
     def get_subtitle_details(self, subtitle_id: int) -> Optional[Dict[str, Any]]:
-        """Hakee tekstityksen yksityiskohdat ID:llä"""
+        """Get subtitle details by ID."""
         
         url = f"{self.base_url}/subtitles/{subtitle_id}"
         
@@ -88,3 +107,26 @@ class OpenSubtitlesClient:
         except requests.exceptions.RequestException as e:
             print(f"Error getting subtitle details: {e}")
             return None
+    
+    def search_subtitles_with_fallback(
+        self,
+        imdb_id: Optional[str] = None,
+        query: Optional[str] = None,
+        season: Optional[int] = None,
+        episode: Optional[int] = None,
+        language: str = "en"
+    ) -> List[Dict[str, Any]]:
+        """
+        Search for subtitles first from OpenSubtitles, then from alternative sources.
+        """
+        # 1. Try OpenSubtitles
+        result = self.search_subtitles(imdb_id, query, season, episode, language)
+        
+        if result:
+            return result
+        
+        # 2. Try alternative source (SubDL or others)
+        print("⚠️ No results from OpenSubtitles, trying fallback...")
+        # Add other API client here
+        
+        return []

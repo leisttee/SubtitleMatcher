@@ -1,3 +1,4 @@
+# smart_match.py
 import re
 from pathlib import Path
 from typing import List, Dict, Optional
@@ -28,13 +29,22 @@ class MovieInfo:
 
 class SmartMatcher:
     def __init__(self):
+        # Lataa config varmuuden vuoksi
+        Config.load()
+        
         self.opensubtitles = OpenSubtitlesClient(
             Config.OPENSUBTITLES_API_KEY
         )
-
+        
+        if not Config.OPENSUBTITLES_API_KEY:
+            print("⚠️ OpenSubtitles API key is empty!")
+        
         self.tmdb = TMDBClient(
             Config.TMDB_API_KEY
         )
+        
+        if not Config.TMDB_API_KEY:
+            print("⚠️ TMDB API key is empty!")
 
     # === SIMILARITY AND SELECTION METHODS ===
 

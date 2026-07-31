@@ -390,21 +390,28 @@ class SubtitleMatcherUI(ctk.CTk):
             self.tmdb_entry.insert(0, tmdb_key)
 
     def save_settings(self):
+        """Tallenna API-avaimet .env-tiedostoon ja päivitä Config"""
         opensub_key = self.opensub_entry.get().strip()
         tmdb_key = self.tmdb_entry.get().strip()
 
         try:
+            # Tallenna .env tiedosto
             with open(self.env_path, "w", encoding="utf-8") as file:
-                file.write("OPENSUBTITLES_API_KEY=" + opensub_key + "\n")
-                file.write("TMDB_API_KEY=" + tmdb_key + "\n")
-
-            os.environ["OPENSUBTITLES_API_KEY"] = opensub_key
-            os.environ["TMDB_API_KEY"] = tmdb_key
-
+                file.write(f"OPENSUBTITLES_API_KEY={opensub_key}\n")
+                file.write(f"TMDB_API_KEY={tmdb_key}\n")
+            
+            # Päivitä Config-luokka
+            from config import Config
+            Config.load()
+            Config.print_status()
+            
+            # Päivitä SmartMatcher uusilla avaimilla
+            self.smart_matcher = SmartMatcher()
+            
             self.settings_status_label.configure(
                 text="Settings saved successfully."
             )
-            self.log_message("Settings saved to: " + str(self.env_path))
+            self.log_message("✅ Settings saved and SmartMatcher updated!")
 
         except Exception as e:
             self.settings_status_label.configure(
@@ -510,9 +517,14 @@ If automatic detection fails, use Manual Match.
     # === API VALIDATION ===
 
     def validate_api_keys_for_smart_match(self):
-        opensub_key = self.opensub_entry.get().strip()
-        tmdb_key = self.tmdb_entry.get().strip()
-
+        """Tarkista API-avaimet ja päivitä Config"""
+        # Lataa ensin .env
+        from config import Config
+        Config.load()
+        
+        opensub_key = Config.OPENSUBTITLES_API_KEY
+        tmdb_key = Config.TMDB_API_KEY
+        
         missing_keys = []
 
         if not opensub_key:
@@ -526,9 +538,9 @@ If automatic detection fails, use Manual Match.
             self.tabview.set("Settings")
             return False
 
-        os.environ["OPENSUBTITLES_API_KEY"] = opensub_key
-        os.environ["TMDB_API_KEY"] = tmdb_key
-
+        # Päivitä SmartMatcher
+        self.smart_matcher = SmartMatcher()
+        
         return True
 
     def show_api_warning(self, missing_keys):
