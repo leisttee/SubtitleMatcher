@@ -32,6 +32,10 @@ class SubtitleMatcherUI(ctk.CTk):
         self.smart_results = {}
         self.current_movie_info = None
         self.current_poster = None
+        
+        # Peruutustila
+        self.download_thread = None
+        self.is_downloading = False
 
         self.base_dir = self.get_base_dir()
         self.env_path = self.base_dir / ".env"
@@ -391,6 +395,18 @@ class SubtitleMatcherUI(ctk.CTk):
         )
         self.smart_download_button.pack(side="left", padx=5)
     
+        # Peruutusnappi
+        self.smart_cancel_button = ctk.CTkButton(
+            button_frame,
+            text="⏹️ Cancel",
+            command=self.cancel_download,
+            width=150,
+            fg_color="#8B0000",
+            hover_color="#CC0000",
+            state="disabled"
+        )
+        self.smart_cancel_button.pack(side="left", padx=5)
+    
         self.smart_match_button = ctk.CTkButton(
             button_frame,
             text="Auto Match & Copy",
@@ -684,6 +700,45 @@ If automatic detection fails, use Manual Match.
         )
         self.result_box.pack(pady=5, padx=10, fill="both", expand=True)
 
+    # === PERUUTUS ===
+
+    def cancel_download(self):
+        """Peruuta meneillään oleva lataus"""
+        if self.is_downloading:
+            self.smart_matcher.cancel("Käyttäjän toimesta")
+            self.smart_cancel_button.configure(state="disabled", text="⏹️ Cancelling...")
+            self.log_message("⏹️ Cancelling download...")
+            self.progress_status_label.configure(text="⏹️ Cancelling...")
+
+    def _update_progress_ui(self, progress: float, status: str):
+        """Päivitä progress UI"""
+        percent = int(progress)
+        self.progress_bar.set(progress / 100)
+        self.progress_label.configure(text=f"{percent}%")
+        if status:
+            self.progress_status_label.configure(text=status)
+
+    def _update_status_ui(self, message: str):
+        """Päivitä status UI"""
+        self.progress_status_label.configure(text=message)
+
+    def _set_buttons_enabled(self, enabled: bool):
+        """Ota käyttöön/poista käytöstä napit"""
+        state = "normal" if enabled else "disabled"
+        self.smart_scan_button.configure(state=state)
+        self.smart_download_button.configure(state=state)
+        self.smart_match_button.configure(state=state)
+        self.smart_mode_menu.configure(state=state)
+        self.language_menu.configure(state=state)
+        self.smart_video_button.configure(state=state)
+        
+        if enabled:
+            self.smart_cancel_button.configure(state="disabled", text="⏹️ Cancel")
+            self.is_downloading = False
+        else:
+            self.smart_cancel_button.configure(state="normal", text="⏹️ Cancel")
+            self.is_downloading = True
+
     # === API VALIDATION ===
 
     def validate_api_keys_for_smart_match(self):
@@ -851,13 +906,11 @@ If automatic detection fails, use Manual Match.
         self.log_message("Library: " + self.smart_video_folder)
         self.log_message("")
 
+        self._set_buttons_enabled(False)
+        
         thread = threading.Thread(target=self._run_smart_scan)
         thread.daemon = True
         thread.start()
-
-    # ui.py - Korvaa _run_smart_scan metodi
-
-    # ui.py - Koko korjattu osuus
 
     def _run_smart_scan(self):
         try:
@@ -913,12 +966,14 @@ If automatic detection fails, use Manual Match.
             self.after(0, lambda: self.progress_bar.set(1.0))
             self.after(0, lambda: self.progress_label.configure(text="100%"))
             self.after(0, lambda: self.progress_status_label.configure(text="Scan complete!"))
+            self.after(0, lambda: self._set_buttons_enabled(True))
     
         except Exception as e:
             self.after(0, lambda: self.log_message("Error: " + str(e)))
             self.after(0, lambda: self.smart_info_label.configure(text="Error scanning"))
             self.after(0, lambda: self.progress_status_label.configure(text="Error!"))
-    
+            self.after(0, lambda: self._set_buttons_enabled(True))
+
     def update_show_info(self, show_name: str):
         """Update info panel with TV show details."""
         try:
@@ -943,7 +998,7 @@ If automatic detection fails, use Manual Match.
             if not details:
                 return
             
-            # Update labels
+                        # Update labels
             self.movie_title_label.configure(text=details.get("title", show_name))
             year = details.get("year", "")
             self.movie_year_label.configure(text=str(year) if year else "")
@@ -1033,70 +1088,6 @@ If automatic detection fails, use Manual Match.
         except Exception as e:
             self.log_message(f"Error updating movie info: {e}")
 
-
-# ui.py - Lisää tämä metodi update_movie_info jälkeen
-
-    def update_show_info(self, show_name: str):
-        """Update info panel with TV show details."""
-        try:
-            # Find show ID
-            show_id = self.smart_matcher.find_show_id(show_name)
-            if not show_id:
-                self.movie_title_label.configure(text=show_name)
-                self.movie_year_label.configure(text="")
-                self.rating_label.configure(text="⭐ N/A")
-                self.vote_count_label.configure(text="")
-                self.genres_label.configure(text="")
-                self.runtime_label.configure(text="TV Series")
-                self.overview_text.configure(state="normal")
-                self.overview_text.delete("1.0", "end")
-                self.overview_text.insert("1.0", "No overview available.")
-                self.overview_text.configure(state="disabled")
-                self.poster_label.configure(text="🎬\nNo poster", image="")
-                return
-
-            # Get show details
-            details = self.smart_matcher.get_show_details(show_id)
-            if not details:
-                return
-
-            # Update labels
-            self.movie_title_label.configure(text=details.get("title", show_name))
-            year = details.get("year", "")
-            self.movie_year_label.configure(text=str(year) if year else "")
-
-            # Rating
-            rating = details.get("rating", 0)
-            votes = details.get("vote_count", 0)
-            self.rating_label.configure(text=f"⭐ {rating:.1f}" if rating > 0 else "⭐ N/A")
-            self.vote_count_label.configure(text=f"({votes:,} votes)" if votes > 0 else "")
-
-            # Genres
-            genres = details.get("genres", [])
-            self.genres_label.configure(text=", ".join(genres[:3]) if genres else "")
-
-            # Runtime
-            self.runtime_label.configure(text="TV Series")
-
-            # Overview
-            overview = details.get("overview", "")
-            self.overview_text.configure(state="normal")
-            self.overview_text.delete("1.0", "end")
-            self.overview_text.insert("1.0", overview if overview else "No overview available.")
-            self.overview_text.configure(state="disabled")
-
-            # Poster
-            poster_path = details.get("poster_path")
-            if poster_path:
-                self.load_poster(poster_path)
-            else:
-                self.poster_label.configure(text="🎬\nNo poster", image="")
-
-            self.status_label.configure(text=f"Loaded: {details.get('title', show_name)}")
-
-        except Exception as e:
-            self.log_message(f"Error updating show info: {e}")
-
     def load_poster(self, poster_path):
         """Load and display movie poster using CTkImage."""
         try:
@@ -1138,6 +1129,15 @@ If automatic detection fails, use Manual Match.
         self.log_message("Downloading subtitles in: " + language_code)
         self.log_message("Starting download process...")
 
+        self._set_buttons_enabled(False)
+        
+        # Aseta progress callbackit
+        self.smart_matcher.set_callbacks(
+            progress_callback=self._update_progress_ui,
+            status_callback=self._update_status_ui
+        )
+        self.smart_matcher.reset_cancel()
+
         thread = threading.Thread(target=self._run_smart_download, args=(language_code, mode))
         thread.daemon = True
         thread.start()
@@ -1152,6 +1152,9 @@ If automatic detection fails, use Manual Match.
         except Exception as e:
             self.after(0, lambda: self.log_message("Error: " + str(e)))
             self.after(0, lambda: self.smart_info_label.configure(text="Error downloading"))
+        finally:
+            self.after(0, lambda: self._set_buttons_enabled(True))
+            self.after(0, lambda: self.smart_cancel_button.configure(state="disabled", text="⏹️ Cancel"))
 
     def _run_tv_download(self, language_code):
         episodes = self.smart_matcher.scan_video_library(self.smart_video_folder)
@@ -1176,21 +1179,21 @@ If automatic detection fails, use Manual Match.
         self.after(0, lambda: self.log_message("IMDB ID: " + imdb_id))
     
         total = len(episodes)
+        self.smart_matcher.total_episodes = total
+        self.smart_matcher.processed_episodes = 0
+        self.smart_matcher.failed_episodes = []
         downloaded = 0
     
         for i, episode in enumerate(episodes):
-            progress = (i + 1) / total
-            percent = int(progress * 100)
+            # Tarkista peruutus
+            if self.smart_matcher.is_cancelled():
+                self.after(0, lambda: self.log_message("⏹️ Download cancelled by user"))
+                break
+                
+            progress = ((i + 1) / total) * 100
             
             # Update progress bar and percentage
-            self.after(0, lambda p=progress: self.progress_bar.set(p))
-            self.after(0, lambda p=percent: self.progress_label.configure(text=f"{p}%"))
-            self.after(
-                0,
-                lambda e=episode, p=percent: self.progress_status_label.configure(
-                    text=f"Processing: S{e.season:02d}E{e.episode:02d} ({p}%)"
-                )
-            )
+            self.after(0, lambda p=progress: self._update_progress_ui(p, f"Processing: S{episode.season:02d}E{episode.episode:02d}"))
     
             subtitle_file = self.smart_matcher.download_subtitles_for_episode(
                 episode,
@@ -1198,6 +1201,8 @@ If automatic detection fails, use Manual Match.
                 language_code
             )
     
+            self.smart_matcher.processed_episodes = i + 1
+            
             if subtitle_file:
                 downloaded += 1
                 self.after(
@@ -1224,12 +1229,24 @@ If automatic detection fails, use Manual Match.
                 0,
                 lambda: self.log_message(f"  ❌ Failed: {total - downloaded} episodes")
             )
-        self.after(
-            0,
-            lambda: self.smart_info_label.configure(
-                text=f"Download complete: {downloaded}/{total} subtitles"
+        if self.smart_matcher.is_cancelled():
+            self.after(
+                0,
+                lambda: self.log_message("⏹️ Cancelled by user")
             )
-        )
+            self.after(
+                0,
+                lambda: self.smart_info_label.configure(
+                    text=f"Cancelled: {downloaded}/{total} subtitles downloaded"
+                )
+            )
+        else:
+            self.after(
+                0,
+                lambda: self.smart_info_label.configure(
+                    text=f"Download complete: {downloaded}/{total} subtitles"
+                )
+            )
         self.after(0, lambda: self.progress_bar.set(1.0))
         self.after(0, lambda: self.progress_label.configure(text="100%"))
         self.after(0, lambda: self.progress_status_label.configure(text="Complete!"))
@@ -1246,15 +1263,15 @@ If automatic detection fails, use Manual Match.
         failed = []
 
         for i, movie in enumerate(movies):
-            progress = (i + 1) / total
-            percent = int(progress * 100)
+            # Tarkista peruutus
+            if self.smart_matcher.is_cancelled():
+                self.after(0, lambda: self.log_message("⏹️ Download cancelled by user"))
+                break
+                
+            progress = ((i + 1) / total) * 100
 
             # Update progress bar and percentage
-            self.after(0, lambda p=progress: self.progress_bar.set(p))
-            self.after(0, lambda p=percent: self.progress_label.configure(text=f"{p}%"))
-            self.after(0, lambda m=movie, p=percent: self.progress_status_label.configure(
-                text=f"Processing: {movie.title} ({p}%)"
-            ))
+            self.after(0, lambda p=progress: self._update_progress_ui(p, f"Processing: {movie.title}"))
 
             # Update info panel with current movie
             self.after(0, lambda m=movie: self.update_movie_info(m))
@@ -1300,13 +1317,25 @@ If automatic detection fails, use Manual Match.
             )
             if len(failed) > 5:
                 self.after(0, lambda: self.log_message(f"     ... and {len(failed) - 5} more"))
-
-        self.after(
-            0,
-            lambda: self.smart_info_label.configure(
-                text=f"Download complete: {downloaded}/{total} subtitles"
+        if self.smart_matcher.is_cancelled():
+            self.after(
+                0,
+                lambda: self.log_message("⏹️ Cancelled by user")
             )
-        )
+            self.after(
+                0,
+                lambda: self.smart_info_label.configure(
+                    text=f"Cancelled: {downloaded}/{total} subtitles downloaded"
+                )
+            )
+        else:
+            self.after(
+                0,
+                lambda: self.smart_info_label.configure(
+                    text=f"Download complete: {downloaded}/{total} subtitles"
+                )
+            )
+
         self.after(0, lambda: self.progress_bar.set(1.0))
         self.after(0, lambda: self.progress_label.configure(text="100%"))
         self.after(0, lambda: self.progress_status_label.configure(text="Complete!"))
@@ -1326,6 +1355,13 @@ If automatic detection fails, use Manual Match.
 
         self.log_message("Mode: " + mode)
         self.log_message("Starting auto match in: " + language_code)
+
+        self._set_buttons_enabled(False)
+        self.smart_matcher.set_callbacks(
+            progress_callback=self._update_progress_ui,
+            status_callback=self._update_status_ui
+        )
+        self.smart_matcher.reset_cancel()
 
         thread = threading.Thread(
             target=self._run_smart_match_and_copy,
@@ -1375,6 +1411,9 @@ If automatic detection fails, use Manual Match.
         except Exception as e:
             self.after(0, lambda: self.log_message(f"❌ Error matching: {str(e)}"))
             self.after(0, lambda: self.smart_info_label.configure(text="Error matching"))
+        finally:
+            self.after(0, lambda: self._set_buttons_enabled(True))
+            self.after(0, lambda: self.smart_cancel_button.configure(state="disabled", text="⏹️ Cancel"))
 
     # === HELPER METHODS ===
 

@@ -27,9 +27,29 @@ class SubDLClient:
         })
         self.last_request_time = 0
         self.min_request_interval = 0.5
+        
+        # Peruutustila
+        self._cancelled = False
+        self._cancel_lock = False
+
+    def cancel(self):
+        """Peruuta meneillään olevat operaatiot"""
+        self._cancelled = True
+        print("⏹️ SubDL: Peruutetaan...")
+
+    def reset_cancel(self):
+        """Nollaa peruutustila"""
+        self._cancelled = False
+
+    def is_cancelled(self) -> bool:
+        """Onko operaatio peruutettu"""
+        return self._cancelled
     
     def _rate_limit(self):
         """Rate limit requests to avoid hitting API limits."""
+        if self.is_cancelled():
+            return
+            
         current_time = time.time()
         time_since_last = current_time - self.last_request_time
         if time_since_last < self.min_request_interval:
@@ -55,6 +75,9 @@ class SubDLClient:
         Returns:
             List of subtitle objects with download URLs
         """
+        if self.is_cancelled():
+            return []
+            
         if not self.api_key:
             print("❌ SubDL API key is missing!")
             return []
@@ -92,6 +115,9 @@ class SubDLClient:
         try:
             print(f"🔍 Searching SubDL: {params}")
             response = self.session.get(url, params=params, timeout=15)
+            
+            if self.is_cancelled():
+                return []
             
             if response.status_code == 200:
                 data = response.json()
@@ -137,6 +163,10 @@ class SubDLClient:
                 print("❌ No subtitles found for the given IDs")
                 return []
             
+            elif response.status_code == 429:
+                print("❌ Rate limit exceeded. Please wait a moment.")
+                return []
+            
             else:
                 print(f"❌ API error: {response.status_code}")
                 print(f"  Response: {response.text[:200]}")
@@ -165,6 +195,9 @@ class SubDLClient:
         Returns:
             Subtitle file content as bytes, or None if download failed
         """
+        if self.is_cancelled():
+            return None
+            
         if not subtitle:
             print("❌ No subtitle data provided")
             return None
@@ -204,6 +237,9 @@ class SubDLClient:
         """
         Download subtitle from a URL with authentication.
         """
+        if self.is_cancelled():
+            return None
+            
         # Ensure URL has proper format
         if not download_url.startswith("http"):
             if download_url.startswith("/"):
@@ -219,9 +255,17 @@ class SubDLClient:
         
         try:
             self._rate_limit()
+            
+            if self.is_cancelled():
+                return None
+                
             print(f"⬇️ Downloading {label}...")
             
-            response = self.session.get(url_with_key, timeout=30)
+            response = self.session.get(url_with_key, timeout=30, stream=True)
+            
+            if self.is_cancelled():
+                response.close()
+                return None
             
             if response.status_code == 200:
                 content = response.content
@@ -237,13 +281,24 @@ class SubDLClient:
                         zip_file = zipfile.ZipFile(io.BytesIO(content))
                         srt_files = [f for f in zip_file.namelist() if f.endswith('.srt')]
                         if srt_files:
+                            # Use the first .srt file
                             with zip_file.open(srt_files[0]) as f:
                                 content = f.read()
                             print(f"✅ Extracted {len(content)} bytes from zip")
                         else:
-                            print("⚠️ No .srt file found in zip, returning raw content")
+                            # Try .ass files
+                            ass_files = [f for f in zip_file.namelist() if f.endswith('.ass')]
+                            if ass_files:
+                                with zip_file.open(ass_files[0]) as f:
+                                    content = f.read()
+                                print(f"✅ Extracted {len(content)} bytes from zip (ASS)")
+                            else:
+                                print("⚠️ No .srt or .ass file found in zip, returning raw content")
                     except zipfile.BadZipFile:
                         print("⚠️ File is not a valid zip, returning as is")
+                    except Exception as e:
+                        print(f"⚠️ Error extracting zip: {e}")
+                        # Return raw content if extraction fails
                 else:
                     print(f"✅ Downloaded {len(content)} bytes")
                 
@@ -259,6 +314,10 @@ class SubDLClient:
             
             elif response.status_code == 403:
                 print("  ❌ Access forbidden (403) - check API key or permissions")
+                return None
+            
+            elif response.status_code == 429:
+                print("  ❌ Rate limit exceeded. Please wait.")
                 return None
             
             else:
@@ -278,6 +337,9 @@ class SubDLClient:
         Legacy method: download subtitle by nId/sd_id.
         Uses the documented download format.
         """
+        if self.is_cancelled():
+            return None
+            
         if not n_id:
             return None
         
@@ -289,11 +351,18 @@ class SubDLClient:
         
         try:
             self._rate_limit()
+            
+            if self.is_cancelled():
+                return None
+                
             print(f"⬇️ Trying download by ID: {n_id}...")
             
             # Add api_key
             url_with_key = f"{download_url}?api_key={self.api_key}"
             response = self.session.get(url_with_key, timeout=30)
+            
+            if self.is_cancelled():
+                return None
             
             if response.status_code == 200:
                 content = response.content
@@ -328,6 +397,9 @@ class SubDLClient:
         """
         Download subtitle and save to file.
         """
+        if self.is_cancelled():
+            return None
+            
         content = self.download_subtitle(subtitle)
         if not content:
             return None

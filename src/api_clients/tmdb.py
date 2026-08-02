@@ -25,9 +25,29 @@ class TMDBClient:
         })
         self.last_request_time = 0
         self.min_request_interval = 0.2  # 5 requests per second max
+        
+        # Peruutustila
+        self._cancelled = False
+        self._cancel_lock = False
+
+    def cancel(self):
+        """Peruuta meneillään olevat operaatiot"""
+        self._cancelled = True
+        print("⏹️ TMDB: Peruutetaan...")
+
+    def reset_cancel(self):
+        """Nollaa peruutustila"""
+        self._cancelled = False
+
+    def is_cancelled(self) -> bool:
+        """Onko operaatio peruutettu"""
+        return self._cancelled
     
     def _rate_limit(self):
         """Rate limit requests to avoid hitting API limits."""
+        if self.is_cancelled():
+            return
+            
         current_time = time.time()
         time_since_last = current_time - self.last_request_time
         if time_since_last < self.min_request_interval:
@@ -45,7 +65,13 @@ class TMDBClient:
         Returns:
             JSON response or None if error
         """
+        if self.is_cancelled():
+            return None
+            
         self._rate_limit()
+        
+        if self.is_cancelled():
+            return None
         
         url = f"{self.base_url}{endpoint}"
         request_params = params or {}
@@ -73,6 +99,9 @@ class TMDBClient:
         Returns:
             List of show results
         """
+        if self.is_cancelled():
+            return []
+            
         if not query:
             return []
         
@@ -99,6 +128,9 @@ class TMDBClient:
         Returns:
             List of movie results
         """
+        if self.is_cancelled():
+            return []
+            
         if not query:
             return []
         
@@ -127,6 +159,9 @@ class TMDBClient:
         Returns:
             Show details or None if error
         """
+        if self.is_cancelled():
+            return None
+            
         if not show_id:
             return None
         
@@ -150,6 +185,9 @@ class TMDBClient:
         Returns:
             Episode details or None if error
         """
+        if self.is_cancelled():
+            return None
+            
         if not show_id or not season or not episode:
             return None
         
@@ -170,6 +208,9 @@ class TMDBClient:
         Returns:
             Dictionary of external IDs
         """
+        if self.is_cancelled():
+            return {}
+            
         if not show_id:
             return {}
         
@@ -189,6 +230,9 @@ class TMDBClient:
         Returns:
             Dictionary of external IDs
         """
+        if self.is_cancelled():
+            return {}
+            
         if not movie_id:
             return {}
         
@@ -209,6 +253,9 @@ class TMDBClient:
         Returns:
             IMDB ID (e.g., "tt1234567") or None
         """
+        if self.is_cancelled():
+            return None
+            
         if is_tv:
             ids = self.get_external_ids(tmdb_id)
         else:
@@ -227,6 +274,9 @@ class TMDBClient:
         Returns:
             Movie details or None if error
         """
+        if self.is_cancelled():
+            return None
+            
         if not movie_id:
             return None
         
@@ -258,6 +308,9 @@ class TMDBClient:
         Returns:
             TMDB ID or None
         """
+        if self.is_cancelled():
+            return None
+            
         if not imdb_id:
             return None
         
@@ -295,6 +348,9 @@ class TMDBClient:
         Returns:
             Best matching result or None
         """
+        if self.is_cancelled():
+            return None
+            
         if not title:
             return None
         
@@ -329,6 +385,9 @@ class TMDBClient:
         Returns:
             Full poster URL or None
         """
+        if self.is_cancelled():
+            return None
+            
         if not poster_path:
             return None
         

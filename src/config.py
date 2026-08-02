@@ -143,6 +143,18 @@ class Config:
             "providers": cls.get_available_providers(),
             "is_valid": cls.is_valid()
         }
+    
+    @classmethod
+    def get_env_path(cls) -> Optional[Path]:
+        """Get the path of the loaded .env file."""
+        return cls._loaded_env_path
+    
+    @classmethod
+    def reload(cls) -> 'Config':
+        """Reload configuration from the same .env file."""
+        if cls._loaded_env_path:
+            return cls.load(cls._loaded_env_path)
+        return cls.load()
 
 
 # Auto-load configuration when module is imported
