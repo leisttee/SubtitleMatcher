@@ -928,7 +928,10 @@ class SmartMatcher:
         # All providers failed
         return None
 
-        def _select_best_subtitle(self, subtitles: List[Dict]) -> Optional[Dict]:
+                # All providers failed
+        return None
+
+    def _select_best_subtitle(self, subtitles: List[Dict]) -> Optional[Dict]:
         """
         Select the best subtitle from OpenSubtitles results.
         """
