@@ -1,4 +1,3 @@
-# smart_match.py
 import re
 import time
 import threading
@@ -9,7 +8,6 @@ from difflib import SequenceMatcher
 
 from config import Config
 from api_clients.subdl import SubDLClient
-from api_clients.opensubtitles import OpenSubtitlesClient
 from api_clients.tmdb import TMDBClient
 
 
@@ -32,32 +30,27 @@ class MovieInfo:
 
 class SmartMatcher:
     def __init__(self):
-        # Lataa config
         Config.load()
         
-        # Peruutus- ja virhehallinta
         self.cancelled = False
         self.paused = False
         self.cancel_lock = threading.Lock()
         self.progress_callback = None
         self.status_callback = None
         
-        # Virheiden seuranta
         self.consecutive_failures = 0
-        self.max_consecutive_failures = 3
+        self.max_consecutive_failures = 10  # Nostettu 3 -> 10
         self.total_failures = 0
-        self.max_total_failures = 10
+        self.max_total_failures = 30  # Nostettu 10 -> 30
         self.api_failure_count = 0
-        self.api_failure_threshold = 3
+        self.api_failure_threshold = 5
         
-        # Prosessin tila
         self.total_episodes = 0
         self.processed_episodes = 0
         self.failed_episodes = []
         self.current_episode = None
-        self.current_provider = 'subdl'  # 'subdl' tai 'opensubtitles'
+        self.current_provider = 'subdl'
         
-        # Initialize SubDL (PRIMARY)
         if Config.SUBDL_API_KEY:
             self.subdl = SubDLClient(Config.SUBDL_API_KEY)
             print("✅ SubDL client initialized (PRIMARY)")
@@ -65,15 +58,8 @@ class SmartMatcher:
             print("⚠️ SubDL API key is empty! Subtitle download will not work.")
             self.subdl = None
         
-        # Initialize OpenSubtitles (FALLBACK)
-        if Config.OPENSUBTITLES_API_KEY:
-            self.opensubtitles = OpenSubtitlesClient(Config.OPENSUBTITLES_API_KEY)
-            print("✅ OpenSubtitles client initialized (FALLBACK)")
-        else:
-            print("⚠️ OpenSubtitles API key is empty!")
-            self.opensubtitles = None
+        self.opensubtitles = None
         
-        # Initialize TMDB
         if Config.TMDB_API_KEY:
             self.tmdb = TMDBClient(Config.TMDB_API_KEY)
             print("✅ TMDB client initialized")
@@ -81,130 +67,73 @@ class SmartMatcher:
             print("⚠️ TMDB API key is empty! Movie/show lookup will not work.")
             self.tmdb = None
 
-    # === PERUUTUS JA VIRHEIDENHALLINTA ===
-
-    def cancel(self, reason: str = ""):
-        """Peruuta meneillään oleva operaatio"""
+        # === STOP / PERUUTUS ===
+    def stop(self, reason: str = ""):
+        """Stop the current operation gracefully"""
         with self.cancel_lock:
             self.cancelled = True
-            print(f"\n⏹️ PERUUTETAAN: {reason if reason else 'Käyttäjän toimesta'}")
+            print(f"\n⏹️ STOPPED: {reason if reason else 'User action'}")
             self._log_status()
+        # Pakota progress-päivitys
+        self._update_progress(status="Stopped")
 
-    def reset_cancel(self):
-        """Nollaa peruutustila"""
+    def reset_stop(self):
+        """Reset stop state"""
         with self.cancel_lock:
             self.cancelled = False
 
-    def is_cancelled(self) -> bool:
-        """Onko operaatio peruutettu"""
+    def is_stopped(self) -> bool:
+        """Check if operation has been stopped"""
         with self.cancel_lock:
             return self.cancelled
+    # === JULKAISURYHMÄN TUNNISTUS ===
+    def _extract_release_group(self, filename: str) -> Optional[str]:
+        if not filename:
+            return None
+        groups = [
+            'KILLERS', 'DIMENSION', 'EVO', 'NTb', 'FUM', 'TOKiG', 
+            'mSD', 'BATV', 'SYS', 'XVID', 'DIVX', 'YIFY', 'YTS',
+            'RARBG', 'EZTV', 'TBS', 'BSG', 'WEB', 'AMZN', 'NF',
+            'HMAX', 'iT', 'DL', 'HC', 'HDTV', 'TV', 'Sub', 'Fix',
+            'DVD', 'REMUX', 'COMPLETE', 'REPACK', 'PROPER'
+        ]
+        filename_upper = filename.upper()
+        for group in groups:
+            if group in filename_upper:
+                return group
+        return None
 
-    def set_callbacks(self, progress_callback=None, status_callback=None):
-        """Aseta takaisinkutsut UI-päivityksiä varten"""
-        self.progress_callback = progress_callback
-        self.status_callback = status_callback
-
-    def _update_progress(self, progress: float = None, status: str = None):
-        """Päivitä edistyminen callbackin kautta"""
-        if self.progress_callback:
-            if progress is None and self.total_episodes > 0:
-                progress = (self.processed_episodes / self.total_episodes) * 100
-            if progress is not None:
-                self.progress_callback(progress, status or self.current_episode)
-
-    def _update_status(self, message: str):
-        """Päivitä status callbackin kautta"""
-        if self.status_callback:
-            self.status_callback(message)
-
-    def _log_status(self):
-        """Tulosta nykyinen tila"""
-        print(f"📊 Käsitelty: {self.processed_episodes}/{self.total_episodes}")
-        if self.failed_episodes:
-            print(f"❌ Epäonnistuneet: {len(self.failed_episodes)} jaksoa")
-        if self.is_cancelled():
-            print("⏹️ TILA: Peruutettu")
-
-    def _check_auto_cancel(self) -> bool:
-        """Tarkista automaattinen peruutus"""
-        if self.consecutive_failures >= self.max_consecutive_failures:
-            self.cancel(f"{self.consecutive_failures} peräkkäistä virhettä")
-            return True
-        
-        if self.total_failures >= self.max_total_failures:
-            self.cancel(f"{self.total_failures} virhettä yhteensä")
-            return True
-            
-        return False
-
-    def _switch_provider(self):
-        """Vaihda API-palvelua virhetilanteessa"""
-        if self.current_provider == 'subdl' and self.opensubtitles:
-            self.current_provider = 'opensubtitles'
-            print("🔄 Vaihdetaan OpenSubtitles-palveluun...")
-            self.api_failure_count = 0
-            return True
-        elif self.current_provider == 'opensubtitles' and self.subdl:
-            self.current_provider = 'subdl'
-            print("🔄 Vaihdetaan SubDL-palveluun...")
-            self.api_failure_count = 0
-            return True
-        return False
-
-    # === SIMILARITY AND SELECTION METHODS ===
-
+    # === SIMILARITY AND SELECTION ===
     def _similarity(self, a: str, b: str) -> float:
-        """
-        Calculate similarity between two strings.
-        Returns a float between 0.0 and 1.0.
-        """
         if not a or not b:
             return 0.0
         return SequenceMatcher(None, a.lower(), b.lower()).ratio()
 
     def _select_best_tv_result(self, query: str, results: List[Dict]) -> Optional[Dict]:
-        """
-        Select the best TV show result based on name similarity.
-        """
         if not results:
             return None
-
         best_result = None
         best_score = 0.0
-
         for result in results:
             result_name = result.get("name", "")
             score = self._similarity(query, result_name)
-            
-            # Bonus for popularity
             popularity = result.get("popularity", 0)
             score += min(popularity / 1000, 0.1)
-
             if score > best_score:
                 best_score = score
                 best_result = result
-
         if best_result:
             print(f"  ✓ TMDB match: '{query}' -> '{best_result.get('name')}' (score: {best_score:.2f})")
-
         return best_result
 
     def _select_best_movie_result(self, title: str, year: Optional[int], results: List[Dict]) -> Optional[Dict]:
-        """
-        Select the best movie result based on title similarity and year.
-        """
         if not results:
             return None
-
         best_result = None
         best_score = 0.0
-
         for result in results:
             result_title = result.get("title", "")
             score = self._similarity(title, result_title)
-
-            # Add bonus for matching year
             result_year = result.get("release_date", "")[:4]
             if year and result_year:
                 try:
@@ -212,118 +141,86 @@ class SmartMatcher:
                         score += 0.3
                 except ValueError:
                     pass
-
-            # Bonus for popularity
             popularity = result.get("popularity", 0)
             score += min(popularity / 1000, 0.1)
-
             if score > best_score:
                 best_score = score
                 best_result = result
-
         if best_result:
             print(f"  ✓ TMDB match: '{title}' -> '{best_result.get('title')}' (score: {best_score:.2f})")
-
         return best_result
 
-    def _select_best_subtitle_subdl(self, subtitles: List[Dict]) -> Optional[Dict]:
-        """
-        Select the best subtitle from SubDL results with intelligent scoring.
-        """
+    def _select_best_subtitle_subdl(self, subtitles: List[Dict], video_filename: str = None) -> Optional[Dict]:
         if not subtitles:
             return None
-        
+        video_group = None
+        if video_filename:
+            video_group = self._extract_release_group(video_filename)
+            if video_group:
+                print(f"  🎯 Videon julkaisuryhmä: {video_group}")
         scored_subtitles = []
-        
         for subtitle in subtitles:
             score = 0
-            
-            # 1. Priorisoi SDH (kuulovammaisille) - usein parempi
             if subtitle.get("hearing_impaired"):
                 score += 10
-            
-            # 2. Tarkista onko unpack_files tai url
             if subtitle.get("unpack_files") or subtitle.get("url"):
                 score += 20
-            
-            # 3. Vältä "forced" tai "foreign" (vain vieraskieliset osat)
+            sub_filename = subtitle.get("filename", "")
+            sub_group = self._extract_release_group(sub_filename)
+            if video_group and sub_group and video_group.upper() == sub_group.upper():
+                score += 50
+                print(f"    ✅ Sama ryhmä: {video_group}")
+            elif sub_group:
+                score += 5
             filename = subtitle.get("filename", "").lower()
             if "forced" in filename or "foreign" in filename:
                 score -= 10
-            
-            # 4. Priorisoi suosituimmat
             downloads = subtitle.get("download_count", 0)
             if downloads:
                 score += min(downloads / 1000, 5)
-            
-            # 5. Tarkista onko nId tai sd_id (legacy)
             if subtitle.get("nId") or subtitle.get("sd_id"):
                 score += 5
-            
             scored_subtitles.append((score, subtitle))
-        
-        # Järjestä pistemäärän mukaan
         scored_subtitles.sort(key=lambda x: x[0], reverse=True)
-        
         if scored_subtitles:
             best_score, best_subtitle = scored_subtitles[0]
             print(f"  ✓ Subtitle selected with score: {best_score}")
+            if video_group:
+                sub_group = self._extract_release_group(best_subtitle.get("filename", ""))
+                if sub_group:
+                    print(f"    Valittu ryhmä: {sub_group}")
             return best_subtitle
-        
         return subtitles[0] if subtitles else None
 
-    # === TV SERIES METHODS ===
-
+    # === SCAN METHODS ===
     def scan_video_library(self, library_path: str) -> List[EpisodeInfo]:
-        """
-        Scan video library and return list of found episodes.
-        """
         episodes = []
         library = Path(library_path)
-
         print(f"Scanning video library: {library}")
-
         for video_file in library.rglob("*"):
-            if self.is_cancelled():
+            if self.is_stopped():
                 break
-                
             if not video_file.is_file():
                 continue
-
             if not self._is_video_file(video_file):
                 continue
-
             print(f"VIDEO FOUND: {video_file.name}")
-
             episode_info = self._parse_tv_filename(video_file.name)
-
             if episode_info:
-                print(
-                    f"MATCHED: "
-                    f"{episode_info.show_name} "
-                    f"S{episode_info.season:02d}"
-                    f"E{episode_info.episode:02d}"
-                )
-
+                print(f"MATCHED: {episode_info.show_name} S{episode_info.season:02d}E{episode_info.episode:02d}")
                 episode_info.file_path = video_file
                 episodes.append(episode_info)
             else:
-                # Try parsing as movie if TV parse fails
                 movie_info = self._parse_movie_filename(video_file.name)
                 if movie_info:
                     print(f"  (This looks like a movie: {movie_info.title})")
                 else:
                     print(f"NO MATCH: {video_file.name}")
-
         print(f"TOTAL EPISODES: {len(episodes)}")
         return episodes
 
     def _parse_tv_filename(self, filename: str) -> Optional[EpisodeInfo]:
-        """
-        Parse TV episode filename.
-        """
         name = Path(filename).stem
-
         patterns = [
             r"(.+?)[\s._-]+S(\d{1,2})E(\d{1,2})",
             r"(.+?)[\s._-]+S(\d{1,2})E(\d{1,2})E\d{1,2}",
@@ -331,40 +228,25 @@ class SmartMatcher:
             r"(.+?)[\s._-]+(\d)(\d{2})(?!\d)",
             r"(.+?)[\s._-]+[Ss]eason[\s._-]*(\d+)[\s._-]+[Ee]pisode[\s._-]*(\d+)",
         ]
-
         for pattern in patterns:
             match = re.search(pattern, name, re.IGNORECASE)
             if not match:
                 continue
-
             try:
                 show_name = self._clean_show_name(match.group(1))
                 season = int(match.group(2))
                 episode = int(match.group(3))
-
                 if season > 30 or episode > 100:
                     continue
-
-                return EpisodeInfo(
-                    show_name=show_name,
-                    season=season,
-                    episode=episode,
-                    file_path=Path("")
-                )
-
+                return EpisodeInfo(show_name=show_name, season=season, episode=episode, file_path=Path(""))
             except (ValueError, IndexError):
                 continue
-
         return None
 
     def _clean_show_name(self, name: str) -> str:
-        """
-        Clean show name.
-        """
         name = re.sub(r"[._-]+", " ", name)
         name = re.sub(r"\s+", " ", name).strip()
         name = re.sub(r"\b(19|20)\d{2}\b", "", name)
-        
         quality_tags = [
             r"\b(480p|720p|1080p|2160p|4K|UHD)\b",
             r"\b(WEBRip|WEB-DL|BluRay|HDRip|BRRip|BDRip)\b",
@@ -377,15 +259,12 @@ class SmartMatcher:
         ]
         for tag in quality_tags:
             name = re.sub(tag, "", name, flags=re.IGNORECASE)
-        
         name = re.sub(r"\bS\d{1,2}E\d{1,2}\b", "", name, flags=re.IGNORECASE)
         name = re.sub(r"\b\d{1,2}x\d{1,2}\b", "", name)
         name = re.sub(r"\b\d{3}\b", "", name)
         name = re.sub(r"\s*\[.*?\]\s*", " ", name)
         name = re.sub(r"\s*\(.*?\)\s*", " ", name)
         name = re.sub(r"\s+", " ", name).strip()
-        
-        # Smart capitalization
         words = name.split()
         if words:
             words[0] = words[0].capitalize()
@@ -394,22 +273,15 @@ class SmartMatcher:
                 word = words[i].lower()
                 words[i] = word if word in short_words else word.capitalize()
             name = " ".join(words)
-        
         return name
 
     def _generate_title_variations(self, title: str) -> List[str]:
-        """
-        Generate intelligent variations of a title for searching.
-        """
         variations = []
         title_lower = title.lower()
-        
         variations.append(title)
-        
         if title_lower.startswith("the "):
             variations.append(title[4:])
             variations.append(title[4:].strip())
-        
         variations.append(title.replace(" & ", " and "))
         variations.append(title.replace(" and ", " & "))
         variations.append(title.replace("'", ""))
@@ -417,8 +289,6 @@ class SmartMatcher:
         variations.append(title_lower)
         variations.append(" ".join(word.capitalize() for word in title_lower.split()))
         variations.append(title.upper())
-        
-        # Remove duplicates while preserving order
         seen = set()
         result = []
         for v in variations:
@@ -426,37 +296,28 @@ class SmartMatcher:
             if v_clean and v_clean not in seen:
                 seen.add(v_clean)
                 result.append(v_clean)
-        
         return result
 
+    # === TMDB METHODS ===
     def find_show_id(self, show_name: str) -> Optional[int]:
-        """
-        Search TMDB TV show ID.
-        """
-        if self.is_cancelled():
+        if self.is_stopped():
             return None
-            
         if not self.tmdb:
             print("❌ TMDB API key not available!")
             return None
-            
         if not show_name:
             return None
-            
         show_name = self._clean_show_name(show_name)
         print(f"Searching for show: '{show_name}'")
-        
         variations = self._generate_title_variations(show_name)
-        
         results = self.tmdb.search_tv_show(show_name)
         if results:
             best = self._select_best_tv_result(show_name, results)
             if best:
                 return best.get("id")
-        
         tried = set()
         for variant in variations:
-            if self.is_cancelled():
+            if self.is_stopped():
                 break
             if variant == show_name or variant in tried:
                 continue
@@ -466,239 +327,93 @@ class SmartMatcher:
                 best = self._select_best_tv_result(variant, results)
                 if best:
                     return best.get("id")
-        
         print(f"✗ Could not find show: '{show_name}'")
         return None
 
     def get_imdb_id(self, show_id: int) -> Optional[str]:
-        """
-        Get IMDb ID from TMDB.
-        """
-        if self.is_cancelled():
+        if self.is_stopped():
             return None
         if not self.tmdb:
             return None
         external_ids = self.tmdb.get_external_ids(show_id)
         return external_ids.get("imdb_id")
 
-    # === MOVIE METHODS ===
-
-    def scan_movie_library(self, library_path: str) -> List[MovieInfo]:
-        """
-        Scan video library for movies.
-        """
-        movies = []
-        library = Path(library_path)
-
-        print(f"Scanning movie library: {library}")
-
-        for video_file in library.rglob("*"):
-            if self.is_cancelled():
-                break
-                
-            if not video_file.is_file():
-                continue
-
-            if not self._is_video_file(video_file):
-                continue
-
-            print(f"VIDEO FOUND: {video_file.name}")
-
-            movie_info = self._parse_movie_filename(video_file.name)
-
-            if movie_info:
-                year_str = f" ({movie_info.year})" if movie_info.year else ""
-                print(f"MATCHED: {movie_info.title}{year_str}")
-
-                movie_info.file_path = video_file
-                movies.append(movie_info)
-            else:
-                print(f"NO MATCH: {video_file.name}")
-
-        print(f"TOTAL MOVIES: {len(movies)}")
-        return movies
-
-    def _parse_movie_filename(self, filename: str) -> Optional[MovieInfo]:
-        """
-        Parse movie filename - improved version.
-        """
-        name = Path(filename).stem
-
-        # Poista yleiset laatutunnisteet
-        clean_name = re.sub(
-            r"\b(480p|720p|1080p|2160p|4K|UHD|WEBRip|WEB-DL|BluRay|HDRip|BRRip|BDRip|YIFY|YTS|RARBG|REPACK|PROPER|x264|x265|HEVC|5\.1|7\.1|2\.0|Stereo|DD5\.1|AC3|DTS|AAC|MP3)\b",
-            "",
-            name,
-            flags=re.IGNORECASE
-        )
-
-        # Poista ryhmät [YTS.GG - YTS.BZ] tms
-        clean_name = re.sub(r'\[.*?\]', '', clean_name)
-        clean_name = re.sub(r'\{.*?\}', '', clean_name)
-
-        # Try to find year in parentheses: "Movie Name (2023)"
-        year_match = re.search(r"\((\d{4})\)", clean_name)
-        if year_match:
-            year = int(year_match.group(1))
-            title = re.sub(r"\s*\(\d{4}\)\s*", "", clean_name)
-            title = self._clean_movie_title(title)
-            if title:
-                return MovieInfo(title=title, year=year, file_path=Path(""))
-
-        # Try to find year: "Movie Name 2023" or "Movie.Name.2023"
-        year_match = re.search(r"[\s._-](\d{4})$", clean_name)
-        if year_match:
-            year = int(year_match.group(1))
-            title = re.sub(r"[\s._-]\d{4}$", "", clean_name)
-            title = self._clean_movie_title(title)
-            if title:
-                return MovieInfo(title=title, year=year, file_path=Path(""))
-
-        # Try to find year: "Movie.Name.2023.1080p"
-        year_match = re.search(r"[\s._-](\d{4})[\s._-]", clean_name)
-        if year_match:
-            year = int(year_match.group(1))
-            title = re.sub(r"[\s._-]\d{4}[\s._-]", " ", clean_name)
-            title = self._clean_movie_title(title)
-            if title:
-                return MovieInfo(title=title, year=year, file_path=Path(""))
-
-        title = self._clean_movie_title(clean_name)
-        
-        if re.search(r"S\d{1,2}E\d{1,2}", title, re.IGNORECASE):
+    def get_show_info_safe(self, show_name: str) -> Optional[Dict[str, Any]]:
+        if self.is_stopped():
             return None
-            
-        if len(title) < 2:
-            return None
-            
-        return MovieInfo(title=title, year=None, file_path=Path(""))
+        if self.tmdb:
+            try:
+                show_id = self.find_show_id(show_name)
+                if show_id:
+                    details = self.get_show_details(show_id)
+                    if details:
+                        return details
+            except Exception as e:
+                print(f"⚠️ TMDB virhe: {e}")
+        print(f"ℹ️ Käytetään perustietoja sarjalle: {show_name}")
+        return {
+            "title": show_name,
+            "year": None,
+            "rating": 0,
+            "vote_count": 0,
+            "genres": [],
+            "overview": "Tietoja ei saatavilla (TMDB ei vastannut)",
+            "poster_path": None,
+            "imdb_id": None
+        }
 
-    def _clean_movie_title(self, name: str) -> str:
-        """
-        Clean movie title - improved version for better detection.
-        """
-        # Poista tiedostopääte
-        name = Path(name).stem
-        
-        # Poista yleiset laatutunnisteet (SÄILYTTÄEN vuosiluvun)
-        quality_patterns = [
-            r'\b(480p|720p|1080p|2160p|4K|UHD)\b',
-            r'\b(WEBRip|WEB-DL|BluRay|HDRip|BRRip|BDRip|DVDRip)\b',
-            r'\b(REPACK|PROPER|REMUX|COMPLETE)\b',
-            r'\b(x264|x265|HEVC|H\.264|H\.265|AVC)\b',
-            r'\b(AC3|DTS|AAC|MP3|DD5\.1|Dual Audio)\b',
-            r'\b(YIFY|YTS|RARBG|EZTV|TBS|XVID|DIVX)\b',
-            r'\b(AMZN|NF|HMAX|iT|WEB|DL)\b',
-            r'\b(HC|HDTV|TV|Season|Sub|Fix|DVD)\b',
-            r'\b(5\.1|7\.1|2\.0|Stereo)\b',
-            r'\b(Eng|Fin|Swe|Nor|Dan|Ger|Fre|Spa|Ita|Por|Rus)\b',
-            r'\b(SDH|HI|CC)\b',
-            r'\b(10bit|8bit|HDR|SDR)\b',
-        ]
-        
-        for pattern in quality_patterns:
-            name = re.sub(pattern, '', name, flags=re.IGNORECASE)
-        
-        # Korvaa pisteet, alaviivat ja yhdysmerkit välilyönneillä
-        name = re.sub(r'[._-]', ' ', name)
-        
-        # Poista ylimääräiset välilyönnit
-        name = re.sub(r'\s+', ' ', name).strip()
-        
-        # Poista hakasulut ja aaltosulut
-        name = re.sub(r'\[.*?\]', '', name)
-        name = re.sub(r'\{.*?\}', '', name)
-        
-        # Käsittele sulut - säilytä vuosiluvut
-        year_match = re.search(r'\((\d{4})\)', name)
-        if year_match:
-            year = year_match.group(1)
-            # Poista kaikki sulut paitsi vuosiluku
-            name = re.sub(r'\([^)]*\)', '', name)
-            # Lisää vuosiluku takaisin
-            name = f"{name.strip()} ({year})"
-        else:
-            # Poista kaikki sulut
-            name = re.sub(r'\([^)]*\)', '', name)
-        
-        # Poista ylimääräiset välilyönnit
-        name = re.sub(r'\s+', ' ', name).strip()
-        
-        # Capitalize first letter of each word (paitsi lyhyet sanat)
-        if name:
-            words = name.split()
-            short_words = {'the', 'and', 'of', 'for', 'with', 'on', 'at', 'by', 'in', 'a', 'an', 'to', 'from', 'up', 'down', 'off', 'over', 'under', 'after', 'before', 'between', 'through', 'during', 'without', 'against', 'among', 'upon', 'toward'}
-            capitalized = []
-            for i, word in enumerate(words):
-                if i == 0 or word.lower() not in short_words:
-                    capitalized.append(word.capitalize())
-                else:
-                    capitalized.append(word.lower())
-            name = ' '.join(capitalized)
-        
-        return name
+    def get_movie_info_safe(self, movie_title: str, year: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        if self.is_stopped():
+            return None
+        if self.tmdb:
+            try:
+                movie_id = self.find_movie_id(movie_title, year)
+                if movie_id:
+                    details = self.get_movie_details(movie_id)
+                    if details:
+                        return details
+            except Exception as e:
+                print(f"⚠️ TMDB virhe: {e}")
+        print(f"ℹ️ Käytetään perustietoja elokuvalle: {movie_title}")
+        return {
+            "title": movie_title,
+            "year": year,
+            "rating": 0,
+            "vote_count": 0,
+            "genres": [],
+            "overview": "Tietoja ei saatavilla (TMDB ei vastannut)",
+            "poster_path": None,
+            "imdb_id": None
+        }
 
-    def find_movie_id(self, title: str, year: Optional[int] = None) -> Optional[int]:
-        """
-        Search TMDB movie ID.
-        """
-        if self.is_cancelled():
-            return None
-            
-        if not self.tmdb:
-            print("❌ TMDB API key not available!")
-            return None
-            
-        if not title:
-            return None
-        
-        title = self._clean_movie_title(title)
-        print(f"Searching for movie: '{title}'")
-        
-        variations = self._generate_title_variations(title)
-        
-        results = self.tmdb.search_movie(title, year=year)
-        if results:
-            best = self._select_best_movie_result(title, year, results)
-            if best:
-                return best.get("id")
-        
-        tried = set()
-        for variant in variations:
-            if self.is_cancelled():
-                break
-            if variant == title or variant in tried:
-                continue
-            tried.add(variant)
-            results = self.tmdb.search_movie(variant, year=year)
-            if results:
-                best = self._select_best_movie_result(variant, year, results)
-                if best:
-                    return best.get("id")
-        
-        print(f"✗ Could not find movie: '{title}'")
-        return None
-
-    def get_movie_imdb_id(self, movie_id: int) -> Optional[str]:
-        """
-        Get IMDb ID for a movie from TMDB.
-        """
-        if self.is_cancelled():
+    def get_show_details(self, tmdb_id: int) -> Optional[Dict[str, Any]]:
+        if self.is_stopped():
             return None
         if not self.tmdb:
             return None
-        external_ids = self.tmdb.get_movie_external_ids(movie_id)
-        return external_ids.get("imdb_id")
+        try:
+            details = self.tmdb.get_show_details(tmdb_id)
+            if details:
+                return {
+                    "title": details.get("name", "Unknown"),
+                    "year": details.get("first_air_date", "")[:4] if details.get("first_air_date") else None,
+                    "rating": details.get("vote_average", 0),
+                    "vote_count": details.get("vote_count", 0),
+                    "genres": [g.get("name") for g in details.get("genres", [])],
+                    "overview": details.get("overview", ""),
+                    "poster_path": details.get("poster_path"),
+                    "imdb_id": details.get("external_ids", {}).get("imdb_id")
+                }
+            return None
+        except Exception as e:
+            print(f"Error getting show details: {e}")
+            return None
 
     def get_movie_details(self, tmdb_id: int) -> Optional[Dict[str, Any]]:
-        """
-        Get detailed movie information from TMDB.
-        """
-        if self.is_cancelled():
+        if self.is_stopped():
             return None
         if not self.tmdb:
             return None
-        
         try:
             details = self.tmdb.get_movie_details(tmdb_id)
             if details:
@@ -718,49 +433,155 @@ class SmartMatcher:
             print(f"Error getting movie details: {e}")
             return None
 
-    def get_show_details(self, tmdb_id: int) -> Optional[Dict[str, Any]]:
-        """
-        Get detailed TV show information from TMDB.
-        """
-        if self.is_cancelled():
+    # === MOVIE METHODS ===
+    def scan_movie_library(self, library_path: str) -> List[MovieInfo]:
+        movies = []
+        library = Path(library_path)
+        print(f"Scanning movie library: {library}")
+        for video_file in library.rglob("*"):
+            if self.is_stopped():
+                break
+            if not video_file.is_file():
+                continue
+            if not self._is_video_file(video_file):
+                continue
+            print(f"VIDEO FOUND: {video_file.name}")
+            movie_info = self._parse_movie_filename(video_file.name)
+            if movie_info:
+                year_str = f" ({movie_info.year})" if movie_info.year else ""
+                print(f"MATCHED: {movie_info.title}{year_str}")
+                movie_info.file_path = video_file
+                movies.append(movie_info)
+            else:
+                print(f"NO MATCH: {video_file.name}")
+        print(f"TOTAL MOVIES: {len(movies)}")
+        return movies
+
+    def _parse_movie_filename(self, filename: str) -> Optional[MovieInfo]:
+        name = Path(filename).stem
+        clean_name = re.sub(
+            r"\b(480p|720p|1080p|2160p|4K|UHD|WEBRip|WEB-DL|BluRay|HDRip|BRRip|BDRip|YIFY|YTS|RARBG|REPACK|PROPER|x264|x265|HEVC|5\.1|7\.1|2\.0|Stereo|DD5\.1|AC3|DTS|AAC|MP3)\b",
+            "", name, flags=re.IGNORECASE
+        )
+        clean_name = re.sub(r'\[.*?\]', '', clean_name)
+        clean_name = re.sub(r'\{.*?\}', '', clean_name)
+        year_match = re.search(r"\((\d{4})\)", clean_name)
+        if year_match:
+            year = int(year_match.group(1))
+            title = re.sub(r"\s*\(\d{4}\)\s*", "", clean_name)
+            title = self._clean_movie_title(title)
+            if title:
+                return MovieInfo(title=title, year=year, file_path=Path(""))
+        year_match = re.search(r"[\s._-](\d{4})$", clean_name)
+        if year_match:
+            year = int(year_match.group(1))
+            title = re.sub(r"[\s._-]\d{4}$", "", clean_name)
+            title = self._clean_movie_title(title)
+            if title:
+                return MovieInfo(title=title, year=year, file_path=Path(""))
+        year_match = re.search(r"[\s._-](\d{4})[\s._-]", clean_name)
+        if year_match:
+            year = int(year_match.group(1))
+            title = re.sub(r"[\s._-]\d{4}[\s._-]", " ", clean_name)
+            title = self._clean_movie_title(title)
+            if title:
+                return MovieInfo(title=title, year=year, file_path=Path(""))
+        title = self._clean_movie_title(clean_name)
+        if re.search(r"S\d{1,2}E\d{1,2}", title, re.IGNORECASE):
             return None
-            
+        if len(title) < 2:
+            return None
+        return MovieInfo(title=title, year=None, file_path=Path(""))
+
+    def _clean_movie_title(self, name: str) -> str:
+        name = Path(name).stem
+        quality_patterns = [
+            r'\b(480p|720p|1080p|2160p|4K|UHD)\b',
+            r'\b(WEBRip|WEB-DL|BluRay|HDRip|BRRip|BDRip|DVDRip)\b',
+            r'\b(REPACK|PROPER|REMUX|COMPLETE)\b',
+            r'\b(x264|x265|HEVC|H\.264|H\.265|AVC)\b',
+            r'\b(AC3|DTS|AAC|MP3|DD5\.1|Dual Audio)\b',
+            r'\b(YIFY|YTS|RARBG|EZTV|TBS|XVID|DIVX)\b',
+            r'\b(AMZN|NF|HMAX|iT|WEB|DL)\b',
+            r'\b(HC|HDTV|TV|Season|Sub|Fix|DVD)\b',
+            r'\b(5\.1|7\.1|2\.0|Stereo)\b',
+            r'\b(Eng|Fin|Swe|Nor|Dan|Ger|Fre|Spa|Ita|Por|Rus)\b',
+            r'\b(SDH|HI|CC)\b',
+            r'\b(10bit|8bit|HDR|SDR)\b',
+        ]
+        for pattern in quality_patterns:
+            name = re.sub(pattern, '', name, flags=re.IGNORECASE)
+        name = re.sub(r'[._-]', ' ', name)
+        name = re.sub(r'\s+', ' ', name).strip()
+        name = re.sub(r'\[.*?\]', '', name)
+        name = re.sub(r'\{.*?\}', '', name)
+        year_match = re.search(r'\((\d{4})\)', name)
+        if year_match:
+            year = year_match.group(1)
+            name = re.sub(r'\([^)]*\)', '', name)
+            name = f"{name.strip()} ({year})"
+        else:
+            name = re.sub(r'\([^)]*\)', '', name)
+        name = re.sub(r'\s+', ' ', name).strip()
+        if name:
+            words = name.split()
+            short_words = {'the', 'and', 'of', 'for', 'with', 'on', 'at', 'by', 'in', 'a', 'an', 'to', 'from', 'up', 'down', 'off', 'over', 'under', 'after', 'before', 'between', 'through', 'during', 'without', 'against', 'among', 'upon', 'toward'}
+            capitalized = []
+            for i, word in enumerate(words):
+                if i == 0 or word.lower() not in short_words:
+                    capitalized.append(word.capitalize())
+                else:
+                    capitalized.append(word.lower())
+            name = ' '.join(capitalized)
+        return name
+
+    def find_movie_id(self, title: str, year: Optional[int] = None) -> Optional[int]:
+        if self.is_stopped():
+            return None
         if not self.tmdb:
-            print("❌ TMDB API key not available!")
             return None
-        
-        try:
-            details = self.tmdb.get_show_details(tmdb_id)
-            if details:
-                return {
-                    "title": details.get("name", "Unknown"),
-                    "year": details.get("first_air_date", "")[:4] if details.get("first_air_date") else None,
-                    "rating": details.get("vote_average", 0),
-                    "vote_count": details.get("vote_count", 0),
-                    "genres": [g.get("name") for g in details.get("genres", [])],
-                    "overview": details.get("overview", ""),
-                    "poster_path": details.get("poster_path"),
-                    "imdb_id": details.get("external_ids", {}).get("imdb_id")
-                }
+        if not title:
             return None
-        except Exception as e:
-            print(f"Error getting show details: {e}")
+        title = self._clean_movie_title(title)
+        print(f"Searching for movie: '{title}'")
+        variations = self._generate_title_variations(title)
+        results = self.tmdb.search_movie(title, year=year)
+        if results:
+            best = self._select_best_movie_result(title, year, results)
+            if best:
+                return best.get("id")
+        tried = set()
+        for variant in variations:
+            if self.is_stopped():
+                break
+            if variant == title or variant in tried:
+                continue
+            tried.add(variant)
+            results = self.tmdb.search_movie(variant, year=year)
+            if results:
+                best = self._select_best_movie_result(variant, year, results)
+                if best:
+                    return best.get("id")
+        print(f"✗ Could not find movie: '{title}'")
+        return None
+
+    def get_movie_imdb_id(self, movie_id: int) -> Optional[str]:
+        if self.is_stopped():
             return None
+        if not self.tmdb:
+            return None
+        external_ids = self.tmdb.get_movie_external_ids(movie_id)
+        return external_ids.get("imdb_id")
 
     def update_movie_info_ui(self, movie_info: MovieInfo) -> Optional[Dict[str, Any]]:
-        """
-        Get movie details for UI display.
-        """
-        if self.is_cancelled():
+        if self.is_stopped():
             return None
-            
         tmdb_id = self.find_movie_id(movie_info.title, movie_info.year)
         if not tmdb_id:
             return None
         return self.get_movie_details(tmdb_id)
 
-    # === DOWNLOAD METHODS ===
-
+   # === DOWNLOAD METHODS ===
     def _download_with_subdl(
         self,
         imdb_id: str,
@@ -768,12 +589,19 @@ class SmartMatcher:
         language: str = "en"
     ) -> Optional[Path]:
         """
-        Download subtitles using SubDL.
+        Download subtitles using SubDL with release group prioritization.
         """
+        if self.is_stopped():
+            print("  ⏹️ Stopped")
+            return None
+            
         try:
             self.current_provider = 'subdl'
             
-            # Search subtitles
+            if self.is_stopped():
+                print("  ⏹️ Stopped before search")
+                return None
+                
             subtitles = self.subdl.search_subtitles(
                 imdb_id=imdb_id,
                 season=episode_info.season,
@@ -782,25 +610,37 @@ class SmartMatcher:
             )
 
             if not subtitles:
-                print(f"  SubDL: Ei tekstejä S{episode_info.season:02d}E{episode_info.episode:02d}")
+                print(f"  SubDL: No subtitles for S{episode_info.season:02d}E{episode_info.episode:02d}")
                 self.api_failure_count += 1
                 return None
 
-            # Select best subtitle
-            subtitle_data = self._select_best_subtitle_subdl(subtitles)
+            if self.is_stopped():
+                print("  ⏹️ Stopped before selection")
+                return None
+
+            video_filename = episode_info.file_path.name if episode_info.file_path else None
+            subtitle_data = self._select_best_subtitle_subdl(subtitles, video_filename)
             if not subtitle_data:
-                print("  SubDL: Ei sopivaa tekstiä")
+                print("  SubDL: No suitable subtitle")
                 self.api_failure_count += 1
                 return None
 
-            # Download
+            if self.is_stopped():
+                print("  ⏹️ Stopped before download")
+                return None
+
+            print("⬇️ Downloading subtitle URL...")
             content = self.subdl.download_subtitle(subtitle_data)
+            
+            if self.is_stopped():
+                print("  ⏹️ Stopped after download")
+                return None
+                
             if not content:
-                print("  SubDL: Lataus epäonnistui")
+                print("  SubDL: Download failed")
                 self.api_failure_count += 1
                 return None
 
-            # Save as .srt
             output_dir = episode_info.file_path.parent
             output_file = output_dir / f"{episode_info.file_path.stem}.srt"
 
@@ -812,74 +652,26 @@ class SmartMatcher:
             return output_file
 
         except Exception as e:
-            print(f"  ❌ SubDL virhe: {e}")
-            self.api_failure_count += 1
-            return None
-
-    def _download_with_opensubtitles(
-        self,
-        imdb_id: str,
-        episode_info: EpisodeInfo,
-        language: str = "en"
-    ) -> Optional[Path]:
-        """
-        Download subtitles using OpenSubtitles (fallback).
-        """
-        if not self.opensubtitles:
-            return None
+            error_msg = str(e).lower()
             
-        try:
-            self.current_provider = 'opensubtitles'
-            
-            subtitles = self.opensubtitles.search_subtitles(
-                imdb_id=imdb_id,
-                season=episode_info.season,
-                episode=episode_info.episode,
-                language=language
-            )
-
-            if not subtitles:
-                print(f"  OpenSubtitles: Ei tekstejä S{episode_info.season:02d}E{episode_info.episode:02d}")
+            if self.is_stopped():
+                print("  ⏹️ Stopped during error handling")
+                return None
+                
+            if "rate limit" in error_msg or "too many" in error_msg:
+                print(f"  ⚠️ Daily 50-download limit reached!")
+                print(f"  ⏳ Resets tomorrow at 3:00 AM")
+                print(f"  📁 Or use 'Browse subtitle file' button for manual download")
                 self.api_failure_count += 1
                 return None
-
-            subtitle_data = self._select_best_subtitle(subtitles)
-            if not subtitle_data:
-                print("  OpenSubtitles: Ei sopivaa tekstiä")
+                
+            if "download" in error_msg or "permission" in error_msg:
+                print(f"  ⚠️ Download failed - daily limit may be reached")
+                print(f"  ⏳ Resets tomorrow at 3:00 AM")
                 self.api_failure_count += 1
                 return None
-
-            file_info = self.opensubtitles.get_subtitle_file(subtitle_data)
-            if not file_info:
-                print("  OpenSubtitles: Ei tiedostotietoja")
-                self.api_failure_count += 1
-                return None
-
-            file_id = file_info.get("file_id")
-            if not file_id:
-                print("  OpenSubtitles: Ei file_id")
-                self.api_failure_count += 1
-                return None
-
-            content = self.opensubtitles.download_subtitle(file_id)
-            if not content:
-                print("  OpenSubtitles: Lataus epäonnistui")
-                self.api_failure_count += 1
-                return None
-
-            # Save as .srt
-            output_dir = episode_info.file_path.parent
-            output_file = output_dir / f"{episode_info.file_path.stem}.srt"
-
-            with open(output_file, "wb") as f:
-                f.write(content)
-
-            print(f"  ✅ OpenSubtitles: {output_file.name}")
-            self.api_failure_count = 0
-            return output_file
-
-        except Exception as e:
-            print(f"  ❌ OpenSubtitles virhe: {e}")
+                
+            print(f"  ❌ SubDL error: {e}")
             self.api_failure_count += 1
             return None
 
@@ -889,106 +681,100 @@ class SmartMatcher:
         imdb_id: str,
         language: str = None
     ) -> Optional[Path]:
-        """
-        Download subtitles for a single episode with intelligent retry and provider switching.
-        """
-        if self.is_cancelled():
+        if self.is_stopped():
             return None
-            
         if language is None:
             language = episode_info.language
-
         episode_str = f"S{episode_info.season:02d}E{episode_info.episode:02d}"
         self.current_episode = episode_str
-
-        # Try primary provider first, then fallback
-        providers = []
         if self.subdl:
-            providers.append(('subdl', self._download_with_subdl))
-        if self.opensubtitles:
-            providers.append(('opensubtitles', self._download_with_opensubtitles))
-
-        for provider_name, download_func in providers:
-            if self.is_cancelled():
-                return None
-                
-            print(f"  🔍 {provider_name}: haetaan {episode_str}...")
-            result = download_func(imdb_id, episode_info, language)
-            
+            print(f"  🔍 SubDL: haetaan {episode_str}...")
+            result = self._download_with_subdl(imdb_id, episode_info, language)
             if result:
                 return result
-                
-            # Provider failed, check if we should switch
-            if self.api_failure_count >= self.api_failure_threshold:
-                if self._switch_provider():
-                    # Reset failure count after switching
-                    self.api_failure_count = 0
-                    continue
-
-        # All providers failed
+            print(f"  ❌ SubDL: {episode_str} ei löytynyt")
+            return None
+        print("❌ SubDL client not available!")
         return None
 
-                # All providers failed
-        return None
-
-    def _select_best_subtitle(self, subtitles: List[Dict]) -> Optional[Dict]:
-        """
-        Select the best subtitle from OpenSubtitles results.
-        """
-        if not subtitles:
+    def download_subtitles_for_movie(
+        self,
+        movie_info: MovieInfo,
+        language: str = "en"
+    ) -> Optional[Path]:
+        if self.is_stopped():
             return None
-
-        best = None
-        best_score = -1
-        
-        valid_subtitles = []
-        for subtitle in subtitles:
-            attributes = subtitle.get("attributes", {})
-            files = attributes.get("files", [])
-            file_id = attributes.get("file_id") or subtitle.get("file_id")
-            
-            if files or file_id:
-                valid_subtitles.append(subtitle)
-        
-        if not valid_subtitles:
-            print("⚠️ No subtitles with valid file IDs found")
+        print(f"Searching for movie: {movie_info.title}")
+        movie_details = self.get_movie_info_safe(movie_info.title, movie_info.year)
+        if self.is_stopped():
             return None
-        
-        print(f"  Found {len(valid_subtitles)} subtitles with valid file IDs")
-
-        for subtitle in valid_subtitles:
-            score = subtitle.get("score", 0)
-            attributes = subtitle.get("attributes", {})
-            
-            if attributes.get("hearing_impaired") or subtitle.get("hearing_impaired"):
-                score += 15
-
-            downloads = attributes.get("download_count", 0) or subtitle.get("download_count", 0)
-            score += min(downloads / 1000, 10)
-
-            files = attributes.get("files", [])
-            if files:
-                for file_info in files:
-                    file_format = file_info.get("file_format", "").lower()
-                    if file_format == "srt":
-                        score += 5
-                    elif file_format == "ass" or file_format == "ssa":
-                        score += 2
-
-            if score > best_score:
-                best_score = score
-                best = subtitle
-
-        if best:
-            print(f"  ✓ Subtitle selected: score={best_score:.1f}")
-            attrs = best.get("attributes", {})
-            files = attrs.get("files", [])
-            if files:
-                print(f"    File ID: {files[0].get('file_id', 'N/A')}")
+        imdb_id = movie_details.get('imdb_id') if movie_details else None
+        if not imdb_id:
+            movie_id = self.find_movie_id(movie_info.title, movie_info.year)
+            if self.is_stopped():
+                return None
+            if not movie_id:
+                print(f"⚠️ Could not find movie: {movie_info.title}")
+                print("ℹ️ Yritetään jatkaa ilman IMDB ID:tä...")
+                imdb_id = None
             else:
-                print(f"    File ID: {attrs.get('file_id', 'N/A')}")
-        
-        return best
+                imdb_id = self.get_movie_imdb_id(movie_id)
+                if self.is_stopped():
+                    return None
+                if not imdb_id:
+                    print(f"⚠️ Could not get IMDb ID for: {movie_info.title}")
+                    print("ℹ️ Yritetään jatkaa ilman IMDB ID:tä...")
+        if imdb_id:
+            print(f"IMDB ID: {imdb_id}")
+        else:
+            print(f"⚠️ Ei IMDB ID:tä - haetaan nimellä")
+        if self.subdl:
+            print("🔍 Using SubDL...")
+            if imdb_id:
+                try:
+                    subtitles = self.subdl.search_subtitles(
+                        imdb_id=imdb_id,
+                        language=language
+                    )
+                except Exception as e:
+                    print(f"  SubDL search error: {e}")
+                    subtitles = None
+            else:
+                try:
+                    subtitles = self.subdl.search_subtitles_by_title(
+                        title=movie_info.title,
+                        year=movie_info.year,
+                        language=language
+                    )
+                except AttributeError:
+                    print("  SubDL ei tue hakua nimellä")
+                    subtitles = None
+                except Exception as e:
+                    print(f"  SubDL search error: {e}")
+                    subtitles = None
+            if subtitles:
+                video_filename = movie_info.file_path.name if movie_info.file_path else None
+                subtitle_data = self._select_best_subtitle_subdl(subtitles, video_filename)
+                if subtitle_data:
+                    content = self.subdl.download_subtitle(subtitle_data)
+                    if content:
+                        output_dir = movie_info.file_path.parent
+                        output_file = output_dir / f"{movie_info.file_path.stem}.srt"
+                        with open(output_file, "wb") as f:
+                            f.write(content)
+
+                        print(f"  ✅ Downloaded from SubDL: {output_file.name}")
+                        return output_file
+                    else:
+                     print("  SubDL: Download failed")
+                else:
+                    print("  SubDL: No suitable subtitle found")
+            else:                         
+                print("  SubDL: No subtitles found")
+        else:
+            print("❌ SubDL client not available!")
+
+        return None
 
     def match_all_episodes(
         self,
@@ -996,10 +782,9 @@ class SmartMatcher:
         language: str = "en"
     ) -> Dict[Path, Path]:
         """
-        Match all episodes and download subtitles with cancel support and smart error handling.
+        Match all episodes and download subtitles with stop support.
         """
-        # Nollaa tila
-        self.reset_cancel()
+        self.reset_stop()
         self.consecutive_failures = 0
         self.total_failures = 0
         self.failed_episodes = []
@@ -1007,59 +792,66 @@ class SmartMatcher:
         self.current_provider = 'subdl'
         self.api_failure_count = 0
 
-        # Skannaa kirjasto
         episodes = self.scan_video_library(library_path)
 
         if not episodes:
             print("No episodes found in library")
             return {}
 
-        if self.is_cancelled():
-            print("⏹️ Operaatio peruutettu ennen aloitusta")
+        if self.is_stopped():
+            print("⏹️ Operation stopped before start")
             return {}
 
-        # Tunnista sarja
         show_name = episodes[0].show_name
         print(f"\n🎬 Detected show: '{show_name}'")
 
-        show_id = self.find_show_id(show_name)
-        if self.is_cancelled():
-            print("⏹️ Operaatio peruutettu")
+        show_info = self.get_show_info_safe(show_name)
+        if self.is_stopped():
+            print("⏹️ Operation stopped")
             return {}
-            
-        if not show_id:
-            print(f"❌ Could not find show: '{show_name}'")
-            return {}
+        
+        if show_info and show_info.get('imdb_id'):
+            imdb_id = show_info.get('imdb_id')
+            print(f"✅ IMDB ID: {imdb_id}")
+        else:
+            show_id = self.find_show_id(show_name)
+            if self.is_stopped():
+                print("⏹️ Operation stopped")
+                return {}
+                
+            if not show_id:
+                print(f"⚠️ Show not found in TMDB: '{show_name}'")
+                print("ℹ️ Continuing without IMDB ID...")
+                imdb_id = None
+            else:
+                imdb_id = self.get_imdb_id(show_id)
+                if self.is_stopped():
+                    print("⏹️ Operation stopped")
+                    return {}
+                
+                if not imdb_id:
+                    print(f"⚠️ Could not get IMDb ID for: '{show_name}'")
+                    print("ℹ️ Continuing without IMDB ID...")
 
-        imdb_id = self.get_imdb_id(show_id)
-        if self.is_cancelled():
-            print("⏹️ Operaatio peruutettu")
-            return {}
-            
-        if not imdb_id:
-            print(f"❌ Could not get IMDb ID for: '{show_name}'")
-            return {}
-
-        # Valmistele lataus
         self.total_episodes = len(episodes)
-        print(f"📦 {self.total_episodes} jaksoa")
-        print(f"🌐 Kieli: {language}")
-        print(f"🎯 IMDB ID: {imdb_id}")
+        print(f"📦 {self.total_episodes} episodes")
+        print(f"🌐 Language: {language}")
+        if imdb_id:
+            print(f"🎯 IMDB ID: {imdb_id}")
+        else:
+            print(f"⚠️ No IMDB ID - searching by show name")
         print("-" * 50)
 
         results = {}
 
         for idx, episode in enumerate(episodes):
-            # Tarkista peruutus
-            if self.is_cancelled():
-                print(f"\n⏹️ Peruutettu {self.processed_episodes}/{self.total_episodes} jakson jälkeen")
+            if self.is_stopped():
+                print(f"\n⏹️ Stopped after {self.processed_episodes}/{self.total_episodes} episodes")
                 break
 
-            # Tarkista automaattinen peruutus
             if self._check_auto_cancel():
                 break
 
-            # Päivitä status
             episode_str = f"S{episode.season:02d}E{episode.episode:02d}"
             self.current_episode = episode_str
             
@@ -1067,27 +859,36 @@ class SmartMatcher:
             print(f"\n📥 [{progress:.1f}%] {episode_str} ({idx+1}/{self.total_episodes})")
             self._update_progress(progress, f"Processing: {episode_str}")
 
-            # Lataa tekstitys
-            subtitle_file = self.download_subtitles_for_episode(
-                episode,
-                imdb_id,
-                language
-            )
+            subtitle_file = None
+            
+            if imdb_id:
+                subtitle_file = self.download_subtitles_for_episode(
+                    episode,
+                    imdb_id,
+                    language
+                )
+            else:
+                print(f"  🔍 Searching by name: {episode.show_name}")
+                print(f"  ❌ No IMDB ID - skipping")
+                self.failed_episodes.append(episode)
+                self.consecutive_failures += 1
+                self.total_failures += 1
 
             if subtitle_file:
                 results[episode.file_path] = subtitle_file
                 self.consecutive_failures = 0
-                print(f"  ✅ {episode_str} ladattu onnistuneesti")
+                print(f"  ✅ {episode_str} downloaded successfully")
+                time.sleep(3)
             else:
-                self.failed_episodes.append(episode)
-                self.consecutive_failures += 1
-                self.total_failures += 1
-                print(f"  ❌ {episode_str} ei löytynyt")
+                if imdb_id:
+                    self.failed_episodes.append(episode)
+                    self.consecutive_failures += 1
+                    self.total_failures += 1
+                    print(f"  ❌ {episode_str} not found")
 
             self.processed_episodes += 1
             self._update_progress()
 
-        # Näytä yhteenveto
         self._show_summary()
         return results
 
@@ -1102,7 +903,7 @@ class SmartMatcher:
         print(f"❌ Epäonnistuneet: {len(self.failed_episodes)}")
         print(f"📊 Käsitelty: {self.processed_episodes}/{self.total_episodes}")
         
-        if self.is_cancelled():
+        if self.is_stopped():
             print("⏹️ TILA: Peruutettu käyttäjän toimesta")
         elif self.consecutive_failures >= self.max_consecutive_failures:
             print(f"⏹️ TILA: Peruutettu automaattisesti ({self.consecutive_failures} peräkkäistä virhettä)")
@@ -1129,21 +930,19 @@ class SmartMatcher:
         """
         Match all movies and download subtitles with cancel support.
         """
-        # Nollaa tila
-        self.reset_cancel()
+        self.reset_stop()
         self.consecutive_failures = 0
         self.total_failures = 0
         self.failed_movies = []
         self.processed_movies = 0
 
-        # Skannaa kirjasto
         movies = self.scan_movie_library(library_path)
 
         if not movies:
             print("No movies found in library")
             return {}
 
-        if self.is_cancelled():
+        if self.is_stopped():
             print("⏹️ Operaatio peruutettu ennen aloitusta")
             return {}
 
@@ -1155,18 +954,15 @@ class SmartMatcher:
         results = {}
 
         for idx, movie in enumerate(movies):
-            # Tarkista peruutus
-            if self.is_cancelled():
+            if self.is_stopped():
                 print(f"\n⏹️ Peruutettu {self.processed_movies}/{self.total_movies} elokuvan jälkeen")
                 break
 
-            # Päivitä status
             self.current_movie = movie.title
             progress = (self.processed_movies / self.total_movies) * 100
             print(f"\n📥 [{progress:.1f}%] {movie.title} ({idx+1}/{self.total_movies})")
             self._update_progress(progress, f"Processing: {movie.title}")
 
-            # Lataa tekstitys
             subtitle_file = self.download_subtitles_for_movie(
                 movie,
                 language
@@ -1176,6 +972,8 @@ class SmartMatcher:
                 results[movie.file_path] = subtitle_file
                 self.consecutive_failures = 0
                 print(f"  ✅ {movie.title} ladattu onnistuneesti")
+                # Odota 3 sekuntia onnistuneen latauksen jälkeen
+                time.sleep(3)
             else:
                 self.failed_movies.append(movie)
                 self.consecutive_failures += 1
@@ -1185,7 +983,6 @@ class SmartMatcher:
             self.processed_movies += 1
             self._update_progress()
 
-        # Näytä yhteenveto
         self._show_movie_summary()
         return results
 
@@ -1200,7 +997,7 @@ class SmartMatcher:
         print(f"❌ Epäonnistuneet: {len(self.failed_movies)}")
         print(f"📊 Käsitelty: {self.processed_movies}/{self.total_movies}")
         
-        if self.is_cancelled():
+        if self.is_stopped():
             print("⏹️ TILA: Peruutettu käyttäjän toimesta")
         else:
             print("✅ TILA: Valmis")
@@ -1215,166 +1012,6 @@ class SmartMatcher:
         
         print("="*50)
 
-    def download_subtitles_for_movie(
-        self,
-        movie_info: MovieInfo,
-        language: str = "en"
-    ) -> Optional[Path]:
-        """
-        Download subtitles for a movie using SubDL (primary) or OpenSubtitles (fallback).
-        """
-        if self.is_cancelled():
-            return None
-            
-        print(f"Searching for movie: {movie_info.title}")
-        
-        # First get IMDB ID via TMDB
-        movie_id = self.find_movie_id(movie_info.title, movie_info.year)
-        if self.is_cancelled():
-            return None
-            
-        if not movie_id:
-            print(f"Could not find movie: {movie_info.title}")
-            return None
-            
-        imdb_id = self.get_movie_imdb_id(movie_id)
-        if self.is_cancelled():
-            return None
-            
-        if not imdb_id:
-            print(f"Could not get IMDb ID for: {movie_info.title}")
-            return None
-            
-        print(f"IMDB ID: {imdb_id}")
-        
-        # Try SubDL first (PRIMARY)
-        if self.subdl:
-            print("🔍 Using SubDL (PRIMARY)...")
-            subtitle_file = self._download_movie_with_subdl(imdb_id, movie_info, language)
-            if subtitle_file:
-                return subtitle_file
-            print("  SubDL failed, trying OpenSubtitles...")
-        
-        # Try OpenSubtitles as fallback
-        if self.opensubtitles:
-            print("🔍 Using OpenSubtitles (FALLBACK)...")
-            return self._download_movie_with_opensubtitles(imdb_id, movie_info, language)
-        
-        print("❌ No subtitle providers available")
-        return None
-
-    def _download_movie_with_subdl(
-        self,
-        imdb_id: str,
-        movie_info: MovieInfo,
-        language: str = "en"
-    ) -> Optional[Path]:
-        """
-        Download subtitles for movie using SubDL.
-        """
-        try:
-            # Search subtitles
-            subtitles = self.subdl.search_subtitles(
-                imdb_id=imdb_id,
-                language=language
-            )
-
-            if not subtitles:
-                print("  No subtitles found from SubDL")
-                return None
-
-            # Select best subtitle
-            subtitle_data = self._select_best_subtitle_subdl(subtitles)
-            if not subtitle_data:
-                print("  No suitable subtitle found from SubDL")
-                return None
-
-            # Download
-            content = self.subdl.download_subtitle(subtitle_data)
-            if not content:
-                print("  Download from SubDL failed")
-                return None
-
-            # Save with .srt extension
-            output_dir = movie_info.file_path.parent
-            output_file = output_dir / f"{movie_info.file_path.stem}.srt"
-
-            with open(output_file, "wb") as f:
-                f.write(content)
-
-            print(f"  ✅ Downloaded from SubDL: {output_file.name}")
-            return output_file
-
-        except Exception as e:
-            print(f"  ❌ SubDL error: {e}")
-            return None
-
-    def _download_movie_with_opensubtitles(
-        self,
-        imdb_id: str,
-        movie_info: MovieInfo,
-        language: str = "en"
-    ) -> Optional[Path]:
-        """
-        Download subtitles for movie using OpenSubtitles (fallback).
-        """
-        try:
-            subtitles = self.opensubtitles.search_subtitles(
-                imdb_id=imdb_id,
-                language=language
-            )
-
-            if not subtitles:
-                print("  No subtitles found from OpenSubtitles")
-                return None
-
-            subtitle_data = self._select_best_subtitle(subtitles)
-            if not subtitle_data:
-                print("  No suitable subtitle found from OpenSubtitles")
-                return None
-
-            file_info = self.opensubtitles.get_subtitle_file(subtitle_data)
-            if not file_info:
-                print("  Could not get file info from OpenSubtitles")
-                return None
-
-            file_id = file_info.get("file_id")
-            if not file_id:
-                print("  No file_id found from OpenSubtitles")
-                return None
-
-            content = self.opensubtitles.download_subtitle(file_id)
-            if not content:
-                print("  Download from OpenSubtitles failed")
-                return None
-
-            # Save with .srt extension
-            output_dir = movie_info.file_path.parent
-            output_file = output_dir / f"{movie_info.file_path.stem}.srt"
-
-            with open(output_file, "wb") as f:
-                f.write(content)
-
-            print(f"  ✅ Downloaded from OpenSubtitles: {output_file.name}")
-            return output_file
-
-        except Exception as e:
-            print(f"  ❌ OpenSubtitles error: {e}")
-            return None
-
-    # === UTILITY METHODS ===
-
-    def _is_video_file(self, file_path: Path) -> bool:
-        """
-        Check whether file is a video file.
-        """
-        video_extensions = {
-            ".mp4", ".mkv", ".avi", ".mov", ".wmv",
-            ".flv", ".webm", ".m4v", ".mpg", ".mpeg",
-            ".ts", ".m2ts", ".iso"
-        }
-        return file_path.suffix.lower() in video_extensions
-
     def get_progress(self) -> Dict[str, Any]:
         """
         Hae nykyinen edistymistila.
@@ -1383,7 +1020,7 @@ class SmartMatcher:
             'total': self.total_episodes,
             'processed': self.processed_episodes,
             'failed': len(self.failed_episodes),
-            'cancelled': self.is_cancelled(),
+            'cancelled': self.is_stopped(),
             'current_episode': self.current_episode,
             'consecutive_failures': self.consecutive_failures,
             'provider': self.current_provider
@@ -1405,27 +1042,31 @@ class SmartMatcher:
 
         print(f"\n🔄 Yritetään uudelleen {len(self.failed_episodes)} epäonnistunutta jaksoa...")
         
-        # Nollaa peruutus
-        self.reset_cancel()
+        self.reset_stop()
         
-        # Haetaan IMDB ID uudelleen
         show_name = self.failed_episodes[0].show_name
-        show_id = self.find_show_id(show_name)
-        if not show_id:
-            print(f"❌ Could not find show: {show_name}")
+        show_info = self.get_show_info_safe(show_name)
+        if not show_info:
+            print(f"⚠️ Could not find show: {show_name}")
             return {}
             
-        imdb_id = self.get_imdb_id(show_id)
+        imdb_id = show_info.get('imdb_id')
         if not imdb_id:
-            print(f"❌ Could not get IMDb ID for: '{show_name}'")
-            return {}
+            show_id = self.find_show_id(show_name)
+            if not show_id:
+                print(f"❌ Could not find show: {show_name}")
+                return {}
+            imdb_id = self.get_imdb_id(show_id)
+            if not imdb_id:
+                print(f"❌ Could not get IMDb ID for: '{show_name}'")
+                return {}
             
         results = {}
         self.total_episodes = len(self.failed_episodes)
         self.processed_episodes = 0
         
         for idx, episode in enumerate(self.failed_episodes):
-            if self.is_cancelled():
+            if self.is_stopped():
                 break
                 
             episode_str = f"S{episode.season:02d}E{episode.episode:02d}"
@@ -1447,4 +1088,130 @@ class SmartMatcher:
             self.processed_episodes += 1
             
         print(f"\n✅ Uudelleenyritys valmis: {len(results)} jaksoa ladattu")
+        return results
+
+            # === UTILITY METHODS ===
+
+    def _is_video_file(self, file_path: Path) -> bool:
+        """
+        Check whether file is a video file.
+        """
+        video_extensions = {
+            ".mp4", ".mkv", ".avi", ".mov", ".wmv",
+            ".flv", ".webm", ".m4v", ".mpg", ".mpeg",
+            ".ts", ".m2ts", ".iso"
+        }
+        return file_path.suffix.lower() in video_extensions
+
+    def _check_auto_cancel(self) -> bool:
+        if self.consecutive_failures >= self.max_consecutive_failures:
+            self.stop(f"{self.consecutive_failures} consecutive failures")
+            return True
+        if self.total_failures >= self.max_total_failures:
+            self.stop(f"{self.total_failures} total failures")
+            return True
+        return False
+
+    def _switch_provider(self):
+        print("⚠️ Only SubDL available - cannot switch")
+        return False
+
+    def _log_status(self):
+        print(f"📊 Processed: {self.processed_episodes}/{self.total_episodes}")
+        if self.failed_episodes:
+            print(f"❌ Failed: {len(self.failed_episodes)} episodes")
+        if self.is_stopped():
+            print("⏹️ STATUS: Stopped")
+
+    def _update_progress(self, progress: float = None, status: str = None):
+        if self.progress_callback:
+            if progress is None and self.total_episodes > 0:
+                progress = (self.processed_episodes / self.total_episodes) * 100
+            if progress is not None:
+                self.progress_callback(progress, status or self.current_episode)
+
+    def _update_status(self, message: str):
+        if self.status_callback:
+            self.status_callback(message)
+
+    def set_callbacks(self, progress_callback=None, status_callback=None):
+        self.progress_callback = progress_callback
+        self.status_callback = status_callback
+
+    def get_progress(self) -> Dict[str, Any]:
+        """
+        Get current progress state.
+        """
+        return {
+            'total': self.total_episodes,
+            'processed': self.processed_episodes,
+            'failed': len(self.failed_episodes),
+            'cancelled': self.is_stopped(),
+            'current_episode': self.current_episode,
+            'consecutive_failures': self.consecutive_failures,
+            'provider': self.current_provider
+        }
+
+    def get_failed_episodes(self) -> List[EpisodeInfo]:
+        """
+        Get failed episodes.
+        """
+        return self.failed_episodes
+
+    def retry_failed_episodes(self, language: str = "en") -> Dict[Path, Path]:
+        """
+        Retry failed episodes.
+        """
+        if not self.failed_episodes:
+            print("No failed episodes")
+            return {}
+
+        print(f"\n🔄 Retrying {len(self.failed_episodes)} failed episodes...")
+        
+        self.reset_stop()
+        
+        show_name = self.failed_episodes[0].show_name
+        show_info = self.get_show_info_safe(show_name)
+        if not show_info:
+            print(f"⚠️ Could not find show: {show_name}")
+            return {}
+            
+        imdb_id = show_info.get('imdb_id')
+        if not imdb_id:
+            show_id = self.find_show_id(show_name)
+            if not show_id:
+                print(f"❌ Could not find show: {show_name}")
+                return {}
+            imdb_id = self.get_imdb_id(show_id)
+            if not imdb_id:
+                print(f"❌ Could not get IMDb ID for: '{show_name}'")
+                return {}
+            
+        results = {}
+        self.total_episodes = len(self.failed_episodes)
+        self.processed_episodes = 0
+        
+        for idx, episode in enumerate(self.failed_episodes):
+            if self.is_stopped():
+                break
+                
+            episode_str = f"S{episode.season:02d}E{episode.episode:02d}"
+            print(f"\n📥 Retrying: {episode_str} ({idx+1}/{self.total_episodes})")
+            
+            subtitle_file = self.download_subtitles_for_episode(
+                episode,
+                imdb_id,
+                language
+            )
+            
+            if subtitle_file:
+                results[episode.file_path] = subtitle_file
+                self.failed_episodes.remove(episode)
+                print(f"  ✅ {episode_str} downloaded successfully")
+            else:
+                print(f"  ❌ {episode_str} still failed")
+                
+            self.processed_episodes += 1
+            
+        print(f"\n✅ Retry complete: {len(results)} episodes downloaded")
         return results

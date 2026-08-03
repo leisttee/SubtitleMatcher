@@ -1,4 +1,3 @@
-# ui.py
 import os
 import sys
 import threading
@@ -19,12 +18,180 @@ from tkinter import filedialog, messagebox
 from PIL import Image, ImageTk
 import requests
 from io import BytesIO
+from typing import List, Dict, Optional, Tuple, Any
+
 
 from scanner import scan_videos, scan_subtitles
 from matcher import find_matches
 from copier import copy_matches
 from smart_match import SmartMatcher
 from config import Config
+
+
+class SubtitleSelectionDialog(ctk.CTkToplevel):
+    """Ikkuna, jossa käyttäjä voi valita tekstitysversion hakutuloksista."""
+    
+    def __init__(self, parent, results, video_filename=None):
+        super().__init__(parent)
+        self.title("Valitse tekstitysversio")
+        self.geometry("700x450")
+        self.results = results
+        self.selected = None
+        
+        # Aseta modaalinen
+        self.transient(parent)
+        self.grab_set()
+        
+        # UI
+        self.build_ui(results, video_filename)
+        
+    def build_ui(self, results, video_filename):
+        # Ohjeteksti
+        info_text = "Valitse haluamasi tekstitysversio. Suositeltu versio on merkitty tähdellä (*)."
+        if video_filename:
+            info_text += f"\nVideon julkaisuryhmä: {self._extract_release_group(video_filename) or 'Ei tunnistettu'}"
+        
+        info_label = ctk.CTkLabel(
+            self,
+            text=info_text,
+            wraplength=650,
+            justify="left"
+        )
+        info_label.pack(pady=(10, 5), padx=10)
+        
+        # Lista tuloksista
+        self.list_frame = ctk.CTkFrame(self)
+        self.list_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        
+        self.list_widget = ctk.CTkScrollableFrame(self.list_frame)
+        self.list_widget.pack(fill="both", expand=True)
+        
+        # Lisää tulokset listaan
+        self.result_items = []
+        for idx, result in enumerate(results):
+            # Luo kehys jokaiselle riville
+            item_frame = ctk.CTkFrame(self.list_widget)
+            item_frame.pack(fill="x", padx=5, pady=2)
+            
+            # Valintanappi
+            radio_var = ctk.StringVar(value="")
+            radio = ctk.CTkRadioButton(
+                item_frame,
+                text="",
+                variable=radio_var,
+                value=str(idx),
+                command=lambda i=idx: self.select_item(i)
+            )
+            radio.pack(side="left", padx=5)
+            
+            # Tiedostonimi (tärkein tieto)
+            filename = result.get("filename", "Tuntematon")
+            is_recommended = idx == 0  # Ensimmäinen on suositeltu
+            
+            # Tunnista julkaisuryhmä
+            group = self._extract_release_group(filename)
+            group_text = f" [{group}]" if group else ""
+            
+            name_label = ctk.CTkLabel(
+                item_frame,
+                text=f"{'⭐ ' if is_recommended else ''}{filename}{group_text}",
+                font=("Segoe UI", 11, "bold" if is_recommended else "normal"),
+                wraplength=400,
+                justify="left"
+            )
+            name_label.pack(side="left", padx=5)
+            
+            # Lisätiedot: kieli, lataukset, uploader
+            details = []
+            if result.get("language"):
+                details.append(result.get("language"))
+            if result.get("download_count"):
+                details.append(f"⬇️ {result.get('download_count')}")
+            if result.get("uploader"):
+                details.append(f"👤 {result.get('uploader')}")
+            if result.get("hearing_impaired"):
+                details.append("🔊 SDH")
+            
+            if details:
+                detail_label = ctk.CTkLabel(
+                    item_frame,
+                    text=" | ".join(details),
+                    font=("Segoe UI", 9),
+                    text_color="gray"
+                )
+                detail_label.pack(side="right", padx=5)
+            
+            # Tallenna viite
+            self.result_items.append({
+                'frame': item_frame,
+                'radio': radio,
+                'radio_var': radio_var,
+                'data': result
+            })
+        
+        # Valitse ensimmäinen oletuksena
+        if self.result_items:
+            self.select_item(0)
+            self.result_items[0]['radio_var'].set("0")
+        
+        # Painikkeet
+        button_frame = ctk.CTkFrame(self)
+        button_frame.pack(pady=10)
+        
+        select_btn = ctk.CTkButton(
+            button_frame,
+            text="Valitse ja lataa",
+            command=self.confirm_selection,
+            width=150
+        )
+        select_btn.pack(side="left", padx=5)
+        
+        cancel_btn = ctk.CTkButton(
+            button_frame,
+            text="Peruuta",
+            command=self.cancel_selection,
+            width=150
+        )
+        cancel_btn.pack(side="left", padx=5)
+    
+    def _extract_release_group(self, filename: str) -> Optional[str]:
+        """Tunnista julkaisuryhmä tiedostonimestä."""
+        if not filename:
+            return None
+        
+        groups = [
+            'KILLERS', 'DIMENSION', 'EVO', 'NTb', 'FUM', 'TOKiG', 
+            'mSD', 'BATV', 'SYS', 'XVID', 'DIVX', 'YIFY', 'YTS',
+            'RARBG', 'EZTV', 'TBS', 'BSG', 'WEB', 'AMZN', 'NF'
+        ]
+        
+        filename_upper = filename.upper()
+        for group in groups:
+            if group in filename_upper:
+                return group
+        return None
+    
+    def select_item(self, index):
+        """Valitse listan kohta."""
+        for i, item in enumerate(self.result_items):
+            if i == index:
+                item['radio'].select()
+                item['frame'].configure(fg_color=("gray75", "gray25"))
+            else:
+                item['frame'].configure(fg_color=("gray94", "gray13"))
+    
+    def confirm_selection(self):
+        """Vahvista valinta ja sulje ikkuna."""
+        for item in self.result_items:
+            if item['radio_var'].get():
+                self.selected = item['data']
+                break
+        self.destroy()
+    
+    def cancel_selection(self):
+        """Peruuta valinta ja sulje ikkuna."""
+        self.selected = None
+        self.destroy()
 
 
 class SubtitleMatcherUI(ctk.CTk):
@@ -361,6 +528,68 @@ class SubtitleMatcherUI(ctk.CTk):
         )
         self.smart_video_label.pack(pady=5)
 
+        # Buttons row 1
+        button_frame1 = ctk.CTkFrame(self.smart_frame)
+        button_frame1.pack(pady=5)
+
+        self.smart_scan_button = ctk.CTkButton(
+            button_frame1,
+            text="Scan Library",
+            command=self.smart_scan,
+            width=150
+        )
+        self.smart_scan_button.pack(side="left", padx=5)
+
+        self.smart_download_button = ctk.CTkButton(
+            button_frame1,
+            text="Download Subtitles",
+            command=self.smart_download,
+            width=150
+        )
+        self.smart_download_button.pack(side="left", padx=5)
+
+        # Stop-nappi
+        self.smart_stop_button = ctk.CTkButton(
+            button_frame1,
+            text="⏹️ Stop",
+            command=self.stop_download,
+            width=150,
+            fg_color="#8B0000",
+            hover_color="#CC0000",
+            state="disabled"
+        )
+        self.smart_stop_button.pack(side="left", padx=5)
+
+        self.smart_match_button = ctk.CTkButton(
+            button_frame1,
+            text="Auto Match & Copy",
+            command=self.smart_match_and_copy,
+            width=150
+        )
+        self.smart_match_button.pack(side="left", padx=5)
+
+        # Browse subtitle file button
+        button_frame2 = ctk.CTkFrame(self.smart_frame)
+        button_frame2.pack(pady=5)
+
+        self.browse_subtitle_button = ctk.CTkButton(
+            button_frame2,
+            text="📁 Browse subtitle file...",
+            command=self.browse_subtitle_file,
+            width=200,
+            fg_color="#2B5B2B",
+            hover_color="#3A7A3A"
+        )
+        self.browse_subtitle_button.pack(side="left", padx=5)
+
+        self.browse_subtitle_label = ctk.CTkLabel(
+            button_frame2,
+            text="",
+            wraplength=300,
+            font=("Segoe UI", 10)
+        )
+        self.browse_subtitle_label.pack(side="left", padx=10)
+
         # Progress bar with percentage label
         progress_frame = ctk.CTkFrame(self.smart_frame)
         progress_frame.pack(pady=15, padx=20, fill="x")
@@ -385,46 +614,6 @@ class SubtitleMatcherUI(ctk.CTk):
             wraplength=700
         )
         self.progress_status_label.pack(pady=(0, 5))
-
-        # Buttons row
-        button_frame = ctk.CTkFrame(self.smart_frame)
-        button_frame.pack(pady=5)
-
-        self.smart_scan_button = ctk.CTkButton(
-            button_frame,
-            text="Scan Library",
-            command=self.smart_scan,
-            width=150
-        )
-        self.smart_scan_button.pack(side="left", padx=5)
-
-        self.smart_download_button = ctk.CTkButton(
-            button_frame,
-            text="Download Subtitles",
-            command=self.smart_download,
-            width=150
-        )
-        self.smart_download_button.pack(side="left", padx=5)
-
-        # Peruutusnappi
-        self.smart_cancel_button = ctk.CTkButton(
-            button_frame,
-            text="Cancel",
-            command=self.cancel_download,
-            width=150,
-            fg_color="#8B0000",
-            hover_color="#CC0000",
-            state="disabled"
-        )
-        self.smart_cancel_button.pack(side="left", padx=5)
-
-        self.smart_match_button = ctk.CTkButton(
-            button_frame,
-            text="Auto Match & Copy",
-            command=self.smart_match_and_copy,
-            width=150
-        )
-        self.smart_match_button.pack(side="left", padx=5)
 
         self.smart_info_label = ctk.CTkLabel(
             self.smart_frame,
@@ -473,18 +662,21 @@ class SubtitleMatcherUI(ctk.CTk):
         )
         subdl_help.pack(pady=(0, 10))
 
-        # === OpenSubtitles API Key (Fallback) ===
+        # === OpenSubtitles API Key (POISTETTU KÄYTÖSTÄ) ===
+        # Jätetty pois käytöstä - näytetään vain info
         ctk.CTkLabel(
             self.settings_frame,
-            text="OpenSubtitles API Key (Fallback)"
-        ).pack(pady=(10, 5))
-
-        self.opensub_entry = ctk.CTkEntry(
+            text="OpenSubtitles API Key (POISTETTU KÄYTÖSTÄ)",
+            font=("Segoe UI", 10),
+            text_color="gray"
+        ).pack(pady=(5, 0))
+        
+        ctk.CTkLabel(
             self.settings_frame,
-            width=600,
-            show="*"
-        )
-        self.opensub_entry.pack(pady=5)
+            text="Ohjelma käyttää vain SubDL API:a. OpenSubtitles on poistettu.",
+            font=("Segoe UI", 9),
+            text_color="gray"
+        ).pack(pady=(0, 10))
 
         # === TMDB API Key ===
         ctk.CTkLabel(
@@ -534,11 +726,9 @@ class SubtitleMatcherUI(ctk.CTk):
     def toggle_key_visibility(self):
         if self.show_keys_var.get():
             self.subdl_entry.configure(show="")
-            self.opensub_entry.configure(show="")
             self.tmdb_entry.configure(show="")
         else:
             self.subdl_entry.configure(show="*")
-            self.opensub_entry.configure(show="*")
             self.tmdb_entry.configure(show="*")
 
     def load_settings(self):
@@ -571,17 +761,12 @@ class SubtitleMatcherUI(ctk.CTk):
             self.subdl_entry.delete(0, "end")
             self.subdl_entry.insert(0, values["SUBDL_API_KEY"])
 
-        if values.get("OPENSUBTITLES_API_KEY"):
-            self.opensub_entry.delete(0, "end")
-            self.opensub_entry.insert(0, values["OPENSUBTITLES_API_KEY"])
-
         if values.get("TMDB_API_KEY"):
             self.tmdb_entry.delete(0, "end")
             self.tmdb_entry.insert(0, values["TMDB_API_KEY"])
 
     def save_settings(self):
         subdl_key = self.subdl_entry.get().strip()
-        opensub_key = self.opensub_entry.get().strip()
         tmdb_key = self.tmdb_entry.get().strip()
 
         try:
@@ -589,12 +774,10 @@ class SubtitleMatcherUI(ctk.CTk):
 
             with open(self.user_env_path, "w", encoding="utf-8") as file:
                 file.write(f"SUBDL_API_KEY={subdl_key}\n")
-                file.write(f"OPENSUBTITLES_API_KEY={opensub_key}\n")
                 file.write(f"TMDB_API_KEY={tmdb_key}\n")
 
             with open(self.env_path, "w", encoding="utf-8") as file:
                 file.write(f"SUBDL_API_KEY={subdl_key}\n")
-                file.write(f"OPENSUBTITLES_API_KEY={opensub_key}\n")
                 file.write(f"TMDB_API_KEY={tmdb_key}\n")
 
             Config.load()
@@ -644,7 +827,6 @@ Steps:
 1. Open the Settings tab.
 2. Enter your API keys:
    - SubDL API Key (Recommended - get at subdl.com)
-   - OpenSubtitles API Key (fallback)
    - TMDB API Key (for IMDb ID lookup & posters)
 3. Save settings.
 4. Open the Smart Match tab.
@@ -672,9 +854,6 @@ API Keys
 SubDL (Recommended - PRIMARY):
   Create an account at subdl.com and generate an API key.
   Most reliable service with excellent availability.
-
-OpenSubtitles (Fallback):
-  Create an account at opensubtitles.com and create an API key.
 
 TMDB:
   Create an account at themoviedb.org and create an API key.
@@ -711,15 +890,33 @@ If automatic detection fails, use Manual Match.
         )
         self.result_box.pack(pady=5, padx=10, fill="both", expand=True)
 
-    # === PERUUTUS ===
+    # === STOP ===
 
-    def cancel_download(self):
-        """Peruuta meneillaan oleva lataus"""
-        if self.is_downloading:
-            self.smart_matcher.cancel("Kayttajan toimesta")
-            self.smart_cancel_button.configure(state="disabled", text="Cancelling...")
-            self.log_message("Cancelling download...")
-            self.progress_status_label.configure(text="Cancelling...")
+    def stop_download(self):
+        """Stop the current download process gracefully"""
+        try:
+            if self.is_downloading:
+                # Aseta ensin napit disabled, jotta käyttäjä ei voi painaa uudelleen
+                self.smart_stop_button.configure(state="disabled", text="Stopping...")
+                self.progress_status_label.configure(text="Stopping...")
+                self.log_message("⏹️ Stopping download...")
+                
+                # Kutsu stop-metodia
+                self.smart_matcher.stop("User requested stop")
+                
+                # Aseta is_downloading False, jotta UI tietää että lataus on pysäytetty
+                self.is_downloading = False
+                
+                # Päivitä UI
+                self._set_buttons_enabled(True)
+                self.smart_info_label.configure(text="Stopped by user")
+                self.progress_status_label.configure(text="Stopped")
+                self.log_message("⏹️ Download stopped successfully")
+        except Exception as e:
+            self.log_message(f"⚠️ Error stopping: {e}")
+            # Pakota napit päälle virheen sattuessa
+            self._set_buttons_enabled(True)
+            self.smart_stop_button.configure(state="disabled", text="⏹️ Stop")
 
     def _update_progress_ui(self, progress: float, status: str):
         """Paivita progress UI"""
@@ -742,12 +939,13 @@ If automatic detection fails, use Manual Match.
         self.smart_mode_menu.configure(state=state)
         self.language_menu.configure(state=state)
         self.smart_video_button.configure(state=state)
+        self.browse_subtitle_button.configure(state=state)
 
         if enabled:
-            self.smart_cancel_button.configure(state="disabled", text="Cancel")
+            self.smart_stop_button.configure(state="disabled", text="⏹️ Stop")
             self.is_downloading = False
         else:
-            self.smart_cancel_button.configure(state="normal", text="Cancel")
+            self.smart_stop_button.configure(state="normal", text="⏹️ Stop")
             self.is_downloading = True
 
     # === API VALIDATION ===
@@ -756,10 +954,9 @@ If automatic detection fails, use Manual Match.
         Config.load()
 
         subdl_key = Config.SUBDL_API_KEY
-        opensub_key = Config.OPENSUBTITLES_API_KEY
         tmdb_key = Config.TMDB_API_KEY
 
-        if not subdl_key or not opensub_key or not tmdb_key:
+        if not subdl_key or not tmdb_key:
             env_to_load = None
             if self.user_env_path.exists():
                 env_to_load = self.user_env_path
@@ -774,8 +971,6 @@ If automatic detection fails, use Manual Match.
                                 key, value = line.strip().split("=", 1)
                                 if key == "SUBDL_API_KEY":
                                     subdl_key = value
-                                elif key == "OPENSUBTITLES_API_KEY":
-                                    opensub_key = value
                                 elif key == "TMDB_API_KEY":
                                     tmdb_key = value
                 except Exception as e:
@@ -785,8 +980,6 @@ If automatic detection fails, use Manual Match.
 
         if not subdl_key:
             missing_keys.append("SUBDL_API_KEY (Recommended - PRIMARY)")
-        if not opensub_key:
-            missing_keys.append("OPENSUBTITLES_API_KEY (Fallback)")
         if not tmdb_key:
             missing_keys.append("TMDB_API_KEY")
 
@@ -796,7 +989,6 @@ If automatic detection fails, use Manual Match.
             return False
 
         Config.SUBDL_API_KEY = subdl_key
-        Config.OPENSUBTITLES_API_KEY = opensub_key
         Config.TMDB_API_KEY = tmdb_key
 
         self.smart_matcher = SmartMatcher()
@@ -903,6 +1095,220 @@ If automatic detection fails, use Manual Match.
         end = display.find(")")
         return display[start:end] if start > 0 and end > start else "en"
 
+    # === UUSI: Selaa tekstitystiedosto ===
+
+    def browse_subtitle_file(self):
+        """Avaa tiedostonvalintadialogi .srt-tiedoston valintaan"""
+        # Tarkista että video on valittu
+        if not self.smart_video_folder:
+            messagebox.showwarning("Virhe", "Valitse ensin videokirjasto (Smart Match -välilehti).")
+            return
+
+        # Valitse tiedosto
+        file_path = filedialog.askopenfilename(
+            title="Valitse tekstitystiedosto",
+            filetypes=[("Tekstitystiedostot", "*.srt"), ("Kaikki tiedostot", "*.*")]
+        )
+        
+        if not file_path:
+            return
+
+        # Tarkista että tiedosto on .srt
+        if not file_path.lower().endswith('.srt'):
+            messagebox.showwarning("Virhe", "Valitse .srt-tiedosto.")
+            return
+
+        self.log_message(f"📂 Valittu tekstitystiedosto: {file_path}")
+        self.browse_subtitle_label.configure(text=Path(file_path).name)
+
+        # Kysy käyttäjältä, mihin videoon tämä liitetään
+        self.show_video_selection_for_subtitle(file_path)
+
+    def show_video_selection_for_subtitle(self, subtitle_path):
+        """Näytä lista videoista, joihin tekstitys voidaan liittää."""
+        # Skannaa videot
+        mode = self.smart_mode_var.get()
+        
+        if mode == "Movie":
+            videos = self.smart_matcher.scan_movie_library(self.smart_video_folder)
+            if not videos:
+                messagebox.showinfo("Ei videoita", "Ei löytynyt elokuvia kirjastosta.")
+                return
+            
+            # Jos vain yksi video, kopioi suoraan
+            if len(videos) == 1:
+                self.copy_subtitle_to_video(subtitle_path, videos[0].file_path)
+                return
+            
+            # Muuten näytä valintaikkuna
+            self.show_video_selection_dialog(subtitle_path, videos)
+        else:
+            # TV Series - etsi oikea jakso
+            episodes = self.smart_matcher.scan_video_library(self.smart_video_folder)
+            if not episodes:
+                messagebox.showinfo("Ei videoita", "Ei löytynyt jaksoja kirjastosta.")
+                return
+            
+            # Yritä tunnistaa jakso tekstityksen nimestä
+            sub_name = Path(subtitle_path).stem
+            matched_episodes = []
+            
+            for ep in episodes:
+                if ep.show_name.lower() in sub_name.lower():
+                    matched_episodes.append(ep)
+            
+            if len(matched_episodes) == 1:
+                self.copy_subtitle_to_video(subtitle_path, matched_episodes[0].file_path)
+                return
+            elif len(matched_episodes) > 1:
+                self.show_episode_selection_dialog(subtitle_path, matched_episodes)
+            else:
+                self.show_episode_selection_dialog(subtitle_path, episodes)
+
+    def show_video_selection_dialog(self, subtitle_path, videos):
+        """Näytä valintaikkuna elokuville."""
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Valitse video")
+        dialog.geometry("500x400")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        label = ctk.CTkLabel(
+            dialog,
+            text="Valitse video, johon tekstitys liitetään:",
+            font=("Segoe UI", 12)
+        )
+        label.pack(pady=10)
+
+        # Lista
+        list_frame = ctk.CTkFrame(dialog)
+        list_frame.pack(fill="both", expand=True, padx=10, pady=5)
+
+        list_widget = ctk.CTkScrollableFrame(list_frame)
+        list_widget.pack(fill="both", expand=True)
+
+        selected_video = [None]
+
+        for video in videos:
+            btn = ctk.CTkButton(
+                list_widget,
+                text=f"{video.title} ({video.year or 'N/A'}) - {video.file_path.name}",
+                command=lambda v=video: [selected_video.__setitem__(0, v), dialog.destroy()],
+                width=450,
+                anchor="w"
+            )
+            btn.pack(pady=2, padx=5, fill="x")
+
+        cancel_btn = ctk.CTkButton(
+            dialog,
+            text="Peruuta",
+            command=dialog.destroy,
+            width=100
+        )
+        cancel_btn.pack(pady=10)
+
+        dialog.wait_window()
+
+        if selected_video[0]:
+            self.copy_subtitle_to_video(subtitle_path, selected_video[0].file_path)
+
+    def show_episode_selection_dialog(self, subtitle_path, episodes):
+        """Näytä valintaikkuna TV-jaksoille."""
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Valitse jakso")
+        dialog.geometry("500x400")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        label = ctk.CTkLabel(
+            dialog,
+            text="Valitse jakso, johon tekstitys liitetään:",
+            font=("Segoe UI", 12)
+        )
+        label.pack(pady=10)
+
+        list_frame = ctk.CTkFrame(dialog)
+        list_frame.pack(fill="both", expand=True, padx=10, pady=5)
+
+        list_widget = ctk.CTkScrollableFrame(list_frame)
+        list_widget.pack(fill="both", expand=True)
+
+        selected_episode = [None]
+
+        for ep in episodes[:50]:
+            btn = ctk.CTkButton(
+                list_widget,
+                text=f"{ep.show_name} S{ep.season:02d}E{ep.episode:02d} - {ep.file_path.name}",
+                command=lambda e=ep: [selected_episode.__setitem__(0, e), dialog.destroy()],
+                width=450,
+                anchor="w"
+            )
+            btn.pack(pady=2, padx=5, fill="x")
+
+        if len(episodes) > 50:
+            info = ctk.CTkLabel(
+                list_widget,
+                text=f"... ja {len(episodes) - 50} muuta jaksoa",
+                text_color="gray"
+            )
+            info.pack(pady=5)
+
+        cancel_btn = ctk.CTkButton(
+            dialog,
+            text="Peruuta",
+            command=dialog.destroy,
+            width=100
+        )
+        cancel_btn.pack(pady=10)
+
+        dialog.wait_window()
+
+        if selected_episode[0]:
+            self.copy_subtitle_to_video(subtitle_path, selected_episode[0].file_path)
+
+    def copy_subtitle_to_video(self, subtitle_path, video_path):
+        """Kopioi tekstitystiedoston videon viereen oikealla nimellä."""
+        try:
+            video_dir = Path(video_path).parent
+            video_stem = Path(video_path).stem
+            subtitle_stem = Path(subtitle_path).stem
+            
+            # Tarkista onko jo olemassa
+            dest_path = video_dir / f"{video_stem}.srt"
+            
+            if dest_path.exists():
+                # Kysy ylikirjoitetaanko
+                overwrite = messagebox.askyesno(
+                    "Tiedosto on olemassa",
+                    f"Tiedosto {dest_path.name} on jo olemassa.\n\nHaluatko korvata sen?"
+                )
+                if not overwrite:
+                    self.log_message(f"⏭️ Ohitettiin: {dest_path.name}")
+                    self.browse_subtitle_label.configure(text="Ohitettu")
+                    return
+            
+            # Kopioi tiedosto
+            import shutil
+            shutil.copy2(subtitle_path, dest_path)
+            
+            self.log_message(f"✅ Kopioitu: {subtitle_path} -> {dest_path}")
+            self.browse_subtitle_label.configure(text=f"Kopioitu: {dest_path.name}")
+            
+            # Päivitä info
+            self.smart_info_label.configure(text=f"Tekstitys kopioitu: {dest_path.name}")
+            
+            # Kysy haluaako käyttäjä lisätä toisen
+            another = messagebox.askyesno(
+                "Valmis",
+                f"Tekstitys kopioitu onnistuneesti!\n\n{dest_path.name}\n\nHaluatko lisätä toisen tekstityksen?"
+            )
+            if another:
+                self.browse_subtitle_file()
+                
+        except Exception as e:
+            self.log_message(f"❌ Virhe kopioinnissa: {e}")
+            messagebox.showerror("Virhe", f"Kopiointi epäonnistui:\n{str(e)}")
+
     def smart_scan(self):
         self.clear_log()
 
@@ -1004,7 +1410,7 @@ If automatic detection fails, use Manual Match.
                 self.poster_label.configure(text="No poster", image="")
                 return
 
-                        # Get show details
+            # Get show details
             details = self.smart_matcher.get_show_details(show_id)
             if not details:
                 return
@@ -1147,7 +1553,7 @@ If automatic detection fails, use Manual Match.
             progress_callback=self._update_progress_ui,
             status_callback=self._update_status_ui
         )
-        self.smart_matcher.reset_cancel()
+        self.smart_matcher.reset_stop()
 
         thread = threading.Thread(target=self._run_smart_download, args=(language_code, mode))
         thread.daemon = True
@@ -1159,13 +1565,22 @@ If automatic detection fails, use Manual Match.
                 self._run_movie_download(language_code)
             else:
                 self._run_tv_download(language_code)
-
         except Exception as e:
-            self.after(0, lambda: self.log_message("Error: " + str(e)))
-            self.after(0, lambda: self.smart_info_label.configure(text="Error downloading"))
+            # Tarkista onko peruutus
+            if self.smart_matcher.is_stopped():
+                self.after(0, lambda: self.log_message("⏹️ Download stopped by user"))
+                self.after(0, lambda: self.smart_info_label.configure(text="Stopped"))
+            else:
+                self.after(0, lambda: self.log_message(f"❌ Error: {str(e)}"))
+                self.after(0, lambda: self.smart_info_label.configure(text=f"Error: {str(e)}"))
         finally:
-            self.after(0, lambda: self._set_buttons_enabled(True))
-            self.after(0, lambda: self.smart_cancel_button.configure(state="disabled", text="Cancel"))
+            # Tämä ajetaan aina, mutta jos sovellus on kaatunut, tämä voi aiheuttaa ongelmia
+            try:
+                self.after(0, lambda: self._set_buttons_enabled(True))
+                self.after(0, lambda: self.smart_stop_button.configure(state="disabled", text="⏹️ Stop"))
+                self.after(0, lambda: self.progress_status_label.configure(text="Ready"))
+            except:
+                pass  # Estä kaatuminen
 
     def _run_tv_download(self, language_code):
         episodes = self.smart_matcher.scan_video_library(self.smart_video_folder)
@@ -1197,8 +1612,8 @@ If automatic detection fails, use Manual Match.
     
         for i, episode in enumerate(episodes):
             # Tarkista peruutus
-            if self.smart_matcher.is_cancelled():
-                self.after(0, lambda: self.log_message("Download cancelled by user"))
+            if self.smart_matcher.is_stopped():
+                self.after(0, lambda: self.log_message("Download stopped by user"))
                 break
                 
             progress = ((i + 1) / total) * 100
@@ -1240,15 +1655,15 @@ If automatic detection fails, use Manual Match.
                 0,
                 lambda: self.log_message(f"  Failed: {total - downloaded} episodes")
             )
-        if self.smart_matcher.is_cancelled():
+        if self.smart_matcher.is_stopped():
             self.after(
                 0,
-                lambda: self.log_message("Cancelled by user")
+                lambda: self.log_message("Stopped by user")
             )
             self.after(
                 0,
                 lambda: self.smart_info_label.configure(
-                    text=f"Cancelled: {downloaded}/{total} subtitles downloaded"
+                    text=f"Stopped: {downloaded}/{total} subtitles downloaded"
                 )
             )
         else:
@@ -1275,8 +1690,8 @@ If automatic detection fails, use Manual Match.
 
         for i, movie in enumerate(movies):
             # Tarkista peruutus
-            if self.smart_matcher.is_cancelled():
-                self.after(0, lambda: self.log_message("Download cancelled by user"))
+            if self.smart_matcher.is_stopped():
+                self.after(0, lambda: self.log_message("Download stopped by user"))
                 break
                 
             progress = ((i + 1) / total) * 100
@@ -1328,15 +1743,15 @@ If automatic detection fails, use Manual Match.
             )
             if len(failed) > 5:
                 self.after(0, lambda: self.log_message(f"     ... and {len(failed) - 5} more"))
-        if self.smart_matcher.is_cancelled():
+        if self.smart_matcher.is_stopped():
             self.after(
                 0,
-                lambda: self.log_message("Cancelled by user")
+                lambda: self.log_message("Stopped by user")
             )
             self.after(
                 0,
                 lambda: self.smart_info_label.configure(
-                    text=f"Cancelled: {downloaded}/{total} subtitles downloaded"
+                    text=f"Stopped: {downloaded}/{total} subtitles downloaded"
                 )
             )
         else:
@@ -1372,7 +1787,7 @@ If automatic detection fails, use Manual Match.
             progress_callback=self._update_progress_ui,
             status_callback=self._update_status_ui
         )
-        self.smart_matcher.reset_cancel()
+        self.smart_matcher.reset_stop()
 
         thread = threading.Thread(
             target=self._run_smart_match_and_copy,
@@ -1424,7 +1839,7 @@ If automatic detection fails, use Manual Match.
             self.after(0, lambda: self.smart_info_label.configure(text="Error matching"))
         finally:
             self.after(0, lambda: self._set_buttons_enabled(True))
-            self.after(0, lambda: self.smart_cancel_button.configure(state="disabled", text="Cancel"))
+            self.after(0, lambda: self.smart_stop_button.configure(state="disabled", text="⏹️ Stop"))
 
     # === HELPER METHODS ===
 

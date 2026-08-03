@@ -1,4 +1,3 @@
-# config.py
 import os
 from pathlib import Path
 from dotenv import load_dotenv
@@ -10,7 +9,7 @@ class Config:
     
     # Class variables for API keys
     SUBDL_API_KEY: Optional[str] = None
-    OPENSUBTITLES_API_KEY: Optional[str] = None
+    # OPENSUBTITLES_API_KEY poistettu - ei enää käytössä
     TMDB_API_KEY: Optional[str] = None
     
     # Track which .env file was loaded
@@ -50,7 +49,7 @@ class Config:
         
         # Load API keys from environment
         cls.SUBDL_API_KEY = os.getenv("SUBDL_API_KEY", "")
-        cls.OPENSUBTITLES_API_KEY = os.getenv("OPENSUBTITLES_API_KEY", "")
+        # OpenSubtitles poistettu
         cls.TMDB_API_KEY = os.getenv("TMDB_API_KEY", "")
         
         cls._loaded_env_path = loaded_path
@@ -62,8 +61,8 @@ class Config:
         """Print API key status."""
         print("\n🔑 API Keys Status:")
         print(f"  SUBDL_API_KEY: {'✅ Set' if cls.SUBDL_API_KEY else '❌ Not set'}")
-        print(f"  OPENSUBTITLES_API_KEY: {'✅ Set' if cls.OPENSUBTITLES_API_KEY else '❌ Not set'}")
         print(f"  TMDB_API_KEY: {'✅ Set' if cls.TMDB_API_KEY else '❌ Not set'}")
+        print(f"  ℹ️ OpenSubtitles on poistettu käytöstä (vain SubDL käytössä)")
         
         # Show which .env file was loaded
         if cls._loaded_env_path:
@@ -94,19 +93,19 @@ class Config:
         # Ensure directory exists
         env_path.parent.mkdir(parents=True, exist_ok=True)
         
-        # Write configuration
+        # Write configuration (vain SubDL ja TMDB)
         with open(env_path, "w", encoding="utf-8") as f:
             f.write(f"SUBDL_API_KEY={cls.SUBDL_API_KEY or ''}\n")
-            f.write(f"OPENSUBTITLES_API_KEY={cls.OPENSUBTITLES_API_KEY or ''}\n")
             f.write(f"TMDB_API_KEY={cls.TMDB_API_KEY or ''}\n")
+            # OpenSubtitles ei enää tallenneta
         
         cls._loaded_env_path = env_path
         print(f"✅ Configuration saved to: {env_path}")
     
     @classmethod
     def is_valid(cls) -> bool:
-        """Check if at least one subtitle provider is configured."""
-        return bool(cls.SUBDL_API_KEY or cls.OPENSUBTITLES_API_KEY)
+        """Check if subtitle provider is configured (vain SubDL)."""
+        return bool(cls.SUBDL_API_KEY)
     
     @classmethod
     def has_tmdb(cls) -> bool:
@@ -115,21 +114,18 @@ class Config:
     
     @classmethod
     def get_available_providers(cls) -> List[str]:
-        """Get list of available subtitle providers."""
+        """Get list of available subtitle providers (vain SubDL)."""
         providers = []
         if cls.SUBDL_API_KEY:
             providers.append("subdl")
-        if cls.OPENSUBTITLES_API_KEY:
-            providers.append("opensubtitles")
+        # OpenSubtitles poistettu
         return providers
     
     @classmethod
     def get_primary_provider(cls) -> Optional[str]:
-        """Get the primary subtitle provider (prefer SubDL)."""
+        """Get the primary subtitle provider (SubDL)."""
         if cls.SUBDL_API_KEY:
             return "subdl"
-        elif cls.OPENSUBTITLES_API_KEY:
-            return "opensubtitles"
         return None
     
     @classmethod
@@ -137,7 +133,6 @@ class Config:
         """Export configuration as dictionary."""
         return {
             "subdl_api_key": cls.SUBDL_API_KEY,
-            "opensubtitles_api_key": cls.OPENSUBTITLES_API_KEY,
             "tmdb_api_key": cls.TMDB_API_KEY,
             "loaded_from": str(cls._loaded_env_path) if cls._loaded_env_path else None,
             "providers": cls.get_available_providers(),
