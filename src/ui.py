@@ -662,22 +662,6 @@ class SubtitleMatcherUI(ctk.CTk):
         )
         subdl_help.pack(pady=(0, 10))
 
-        # === OpenSubtitles API Key (POISTETTU KÄYTÖSTÄ) ===
-        # Jätetty pois käytöstä - näytetään vain info
-        ctk.CTkLabel(
-            self.settings_frame,
-            text="OpenSubtitles API Key (POISTETTU KÄYTÖSTÄ)",
-            font=("Segoe UI", 10),
-            text_color="gray"
-        ).pack(pady=(5, 0))
-        
-        ctk.CTkLabel(
-            self.settings_frame,
-            text="Ohjelma käyttää vain SubDL API:a. OpenSubtitles on poistettu.",
-            font=("Segoe UI", 9),
-            text_color="gray"
-        ).pack(pady=(0, 10))
-
         # === TMDB API Key ===
         ctk.CTkLabel(
             self.settings_frame,
